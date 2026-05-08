@@ -54,31 +54,17 @@ const CONFIG = {
 
 const SUPABASE_REST_URL = `${CONFIG.supabaseUrl}/rest/v1`;
 
-let reminderLoopBusy = false;
+const IS_VERCEL = Boolean(process.env.VERCEL);
 
-main().catch((error) => {
-  console.error("Avvio fallito:", error.message || error);
-  process.exitCode = 1;
-});
+let reminderLoopBusy = false;
+let reminderLoopStarted = false;
+let appReadyPromise = null;
 
 async function main() {
-  ensureSupabaseConfig();
-  await seedInitialAdmin();
+  await ensureAppReady();
+  startReminderLoop();
 
-  setInterval(() => {
-    processDueReminders().catch((error) => {
-      console.error("Errore reminder:", error.message || error);
-    });
-  }, REMINDER_LOOP_INTERVAL_MS);
-
-  const server = http.createServer((req, res) => {
-    handleRequest(req, res).catch((error) => {
-      console.error("Errore richiesta:", error);
-      sendJson(res, 500, {
-        error: "Errore interno del server"
-      });
-    });
-  });
+  const server = http.createServer(requestListener);
 
   server.listen(CONFIG.port, () => {
     console.log(`Piattaforma appuntamenti attiva su http://localhost:${CONFIG.port}`);
@@ -87,6 +73,55 @@ async function main() {
     );
   });
 }
+
+async function ensureAppReady() {
+  if (!appReadyPromise) {
+    appReadyPromise = (async () => {
+      ensureSupabaseConfig();
+      await seedInitialAdmin();
+    })().catch((error) => {
+      appReadyPromise = null;
+      throw error;
+    });
+  }
+
+  return appReadyPromise;
+}
+
+function startReminderLoop() {
+  if (reminderLoopStarted || IS_VERCEL) {
+    return;
+  }
+
+  reminderLoopStarted = true;
+  setInterval(() => {
+    processDueReminders().catch((error) => {
+      console.error("Errore reminder:", error.message || error);
+    });
+  }, REMINDER_LOOP_INTERVAL_MS);
+}
+
+async function requestListener(req, res) {
+  try {
+    await ensureAppReady();
+    await handleRequest(req, res);
+  } catch (error) {
+    console.error("Errore richiesta:", error);
+    sendJson(res, 500, {
+      error: "Errore interno del server"
+    });
+  }
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error("Avvio fallito:", error.message || error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = requestListener;
+module.exports.processDueReminders = processDueReminders;
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
