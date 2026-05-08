@@ -1,0 +1,14 @@
+{
+  "name": "gestione-appuntamenti",
+  "version": "1.0.0",
+  "description": "Piattaforma standalone per la gestione completa degli appuntamenti con autenticazione, ruoli e reminder multicanale.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "supabase": "^2.95.2"
+  }
+}

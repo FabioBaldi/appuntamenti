@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gestione Appuntamenti</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <aside class="brand-panel">
+        <div id="brandLogoShell" class="brand-logo-shell hidden">
+          <img id="brandLogoImage" class="brand-logo-image" alt="Logo amministratore" />
+        </div>
+        <div class="brand-badge">Scheduler Pro</div>
+        <p id="brandIdentity" class="brand-identity hidden"></p>
+        <h1>Gestione appuntamenti con accesso sicuro e reminder multicanale.</h1>
+        <p class="lead">
+          Login con username e password, ruoli admin/user, creazione utenti riservata agli
+          amministratori e notifiche via email, SMS o WhatsApp.
+        </p>
+
+        <div class="info-card">
+          <span class="eyebrow">Funzioni incluse</span>
+          <ul>
+            <li>Autenticazione con sessione protetta</li>
+            <li>Ruoli admin e user</li>
+            <li>Agenda appuntamenti completa</li>
+            <li>Reminder automatici e manuali</li>
+          </ul>
+        </div>
+
+        <div class="info-card">
+          <span class="eyebrow">Credenziali iniziali</span>
+          <p>
+            Al primo avvio viene creato un admin di default. Puoi cambiarlo dal file
+            <code>.env</code>.
+          </p>
+          <code>admin / Admin123!</code>
+        </div>
+      </aside>
+
+      <main class="workspace-panel">
+        <section id="loginView" class="panel auth-panel">
+          <div class="panel-header">
+            <div>
+              <span class="eyebrow">Accesso piattaforma</span>
+              <h2>Entra nel sistema</h2>
+            </div>
+          </div>
+
+          <form id="loginForm" class="stack-form">
+            <label>
+              <span>Username</span>
+              <input id="loginUsername" type="text" autocomplete="username" required />
+            </label>
+
+            <label>
+              <span>Password</span>
+              <input id="loginPassword" type="password" autocomplete="current-password" required />
+            </label>
+
+            <button class="primary-button" type="submit">Accedi</button>
+            <p id="loginFeedback" class="feedback"></p>
+          </form>
+        </section>
+
+        <section id="appView" class="app-view hidden">
+          <header class="topbar">
+            <div>
+              <span class="eyebrow">Pannello operativo</span>
+              <h2>Agenda e comunicazioni</h2>
+            </div>
+
+            <div class="topbar-actions">
+              <div class="user-chip">
+                <strong id="currentUserName"></strong>
+                <span id="currentUserRole"></span>
+              </div>
+              <button id="refreshButton" class="secondary-button" type="button">Aggiorna</button>
+              <button id="logoutButton" class="secondary-button" type="button">Esci</button>
+            </div>
+          </header>
+
+          <nav class="tab-row">
+            <button class="tab-button active" data-tab="dashboard" type="button">Dashboard</button>
+            <button class="tab-button" data-tab="appointments" type="button">Appuntamenti</button>
+            <button class="tab-button admin-only" data-tab="users" type="button">Utenti</button>
+            <button class="tab-button" data-tab="delivery" type="button">Reminder</button>
+          </nav>
+
+          <section id="dashboardTab" class="tab-panel active">
+            <div id="dashboardStats" class="stats-grid"></div>
+            <div class="panel split-panel">
+              <div>
+                <div class="section-heading">
+                  <span class="eyebrow">Prossimi appuntamenti</span>
+                  <h3>Vista rapida</h3>
+                </div>
+                <div id="upcomingAppointments" class="compact-list"></div>
+              </div>
+              <div>
+                <div class="section-heading">
+                  <span class="eyebrow">Reminder</span>
+                  <h3>Stato invii</h3>
+                </div>
+                <div id="deliverySummary" class="compact-list"></div>
+              </div>
+            </div>
+          </section>
+
+          <section id="appointmentsTab" class="tab-panel">
+            <div class="content-grid">
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Nuovo o modifica</span>
+                  <h3 id="appointmentFormTitle">Crea appuntamento</h3>
+                </div>
+
+                <form id="appointmentForm" class="stack-form">
+                  <input id="appointmentId" type="hidden" />
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Titolo</span>
+                      <input id="title" type="text" required />
+                    </label>
+                    <label>
+                      <span>Servizio</span>
+                      <input id="service" type="text" required />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Cliente</span>
+                      <input id="clientName" type="text" required />
+                    </label>
+                    <label>
+                      <span>Stato</span>
+                      <select id="status">
+                        <option value="scheduled">Programmato</option>
+                        <option value="completed">Completato</option>
+                        <option value="cancelled">Annullato</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Email cliente</span>
+                      <input id="clientEmail" type="email" />
+                    </label>
+                    <label>
+                      <span>Telefono cliente</span>
+                      <input id="clientPhone" type="tel" placeholder="+39..." />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns date-fields-grid">
+                    <label>
+                      <span>Data e ora inizio</span>
+                      <input id="startAt" type="datetime-local" required />
+                    </label>
+                    <label>
+                      <span>Data e ora fine</span>
+                      <input id="endAt" type="datetime-local" />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Luogo</span>
+                      <input id="location" type="text" />
+                    </label>
+                    <label class="admin-only">
+                      <span>Assegna a</span>
+                      <select id="assignedUserId"></select>
+                    </label>
+                  </div>
+
+                  <label>
+                    <span>Descrizione</span>
+                    <textarea id="description" rows="3"></textarea>
+                  </label>
+
+                  <label>
+                    <span>Note interne</span>
+                    <textarea id="notes" rows="3"></textarea>
+                  </label>
+
+                  <div class="reminder-box">
+                    <label class="toggle-row">
+                      <input id="reminderEnabled" type="checkbox" />
+                      <span>Attiva reminder per il cliente</span>
+                    </label>
+
+                    <div id="reminderFields" class="stack-form reminder-fields disabled">
+                      <div class="field-grid two-columns">
+                        <label>
+                          <span>Ore prima</span>
+                          <input id="reminderHoursBefore" type="number" min="0" step="0.5" value="1" />
+                        </label>
+                        <label>
+                          <span>Canali</span>
+                          <div class="checkbox-group">
+                            <label><input type="checkbox" value="email" name="channel" /> Email</label>
+                            <label><input type="checkbox" value="sms" name="channel" /> SMS</label>
+                            <label><input type="checkbox" value="whatsapp" name="channel" /> WhatsApp</label>
+                          </div>
+                        </label>
+                      </div>
+
+                      <label>
+                        <span>Messaggio personalizzato</span>
+                        <textarea
+                          id="reminderMessage"
+                          rows="4"
+                          placeholder="Lascia vuoto per usare il testo automatico."
+                        ></textarea>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="form-actions">
+                    <button id="saveAppointmentButton" class="primary-button" type="submit">
+                      Salva appuntamento
+                    </button>
+                    <button id="cancelAppointmentEdit" class="secondary-button hidden" type="button">
+                      Annulla modifica
+                    </button>
+                  </div>
+                  <p id="appointmentFeedback" class="feedback"></p>
+                </form>
+              </section>
+
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Archivio operativo</span>
+                  <h3>Appuntamenti</h3>
+                </div>
+                <div id="appointmentsList" class="appointments-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="usersTab" class="tab-panel">
+            <div class="content-grid users-content-grid">
+              <section id="brandingPanel" class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Branding centrale</span>
+                  <h3>Logo per account admin</h3>
+                </div>
+
+                <div id="brandingManagerSection" class="brand-settings-card">
+                  <label>
+                    <span>Seleziona admin</span>
+                    <select id="brandingTargetAdminId"></select>
+                  </label>
+
+                  <div id="brandingPreview" class="logo-preview-card hidden">
+                    <img id="brandingPreviewImage" class="logo-preview-image" alt="Anteprima logo admin" />
+                  </div>
+                  <p id="brandingDescription" class="muted">
+                    Solo l'admin principale puo assegnare o modificare il logo degli account admin.
+                  </p>
+
+                  <form id="brandingForm" class="stack-form">
+                    <label>
+                      <span>Carica logo</span>
+                      <input id="brandingLogoFile" type="file" accept="image/*" />
+                    </label>
+
+                    <div class="form-actions">
+                      <button class="primary-button" type="submit">Salva logo</button>
+                      <button id="removeBrandingButton" class="secondary-button" type="button">
+                        Rimuovi logo
+                      </button>
+                    </div>
+                    <p id="brandingFeedback" class="feedback"></p>
+                  </form>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Admin only</span>
+                  <h3 id="userFormTitle">Crea utente</h3>
+                </div>
+
+                <form id="userForm" class="stack-form">
+                  <input id="userEditId" type="hidden" />
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Nome completo</span>
+                      <input id="userFullName" type="text" required />
+                    </label>
+                    <label>
+                      <span>Username</span>
+                      <input id="userUsername" type="text" required />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Password</span>
+                      <input id="userPassword" type="password" minlength="6" required />
+                      <small id="userPasswordHelp" class="muted hidden">
+                        Lascia vuoto per mantenere la password attuale.
+                      </small>
+                    </label>
+                    <label>
+                      <span>Ruolo</span>
+                      <select id="userRole">
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <small id="userRoleHelp" class="muted hidden">
+                        In modifica il ruolo resta bloccato per evitare cambi strutturali non voluti.
+                      </small>
+                    </label>
+                  </div>
+
+                  <label id="userLogoField" class="hidden">
+                    <span>Logo del nuovo admin</span>
+                    <input id="userLogoFile" type="file" accept="image/*" />
+                    <small class="muted">
+                      Questo campo e disponibile solo per l'admin principale. Il logo assegnato al
+                      nuovo admin verra ereditato da tutti gli utenti creati da quel ramo.
+                    </small>
+                  </label>
+
+                  <p class="muted">
+                    Gli utenti creati da un admin ereditano automaticamente il logo del suo ramo.
+                  </p>
+
+                  <div class="form-actions">
+                    <button id="userSubmitButton" class="primary-button" type="submit">Crea utente</button>
+                    <button id="userCancelEdit" class="secondary-button hidden" type="button">
+                      Annulla modifica
+                    </button>
+                  </div>
+                  <p id="userFeedback" class="feedback"></p>
+                </form>
+              </section>
+
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Utenti attivi</span>
+                  <h3>Elenco profili</h3>
+                </div>
+                <div id="usersList" class="user-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="deliveryTab" class="tab-panel">
+            <div class="content-grid">
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Canali disponibili</span>
+                  <h3>Configurazione reminder</h3>
+                </div>
+                <div id="deliveryChannels" class="channel-grid"></div>
+              </section>
+
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Setup rapido</span>
+                  <h3>Provider esterni</h3>
+                </div>
+                <div class="steps">
+                  <p>1. Copia <code>.env.example</code> in <code>.env</code>.</p>
+                  <p>2. Inserisci credenziali Resend per email e Twilio per SMS/WhatsApp.</p>
+                  <p>3. Riavvia il server per attivare gli invii reali.</p>
+                  <p>
+                    Se i provider non sono configurati, il sistema resta testabile in modalita mock e
+                    simula gli invii senza dipendere da servizi esterni.
+                  </p>
+                </div>
+              </section>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
