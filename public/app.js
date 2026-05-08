@@ -775,9 +775,10 @@ function populateUserForm(user) {
   elements.userUsername.value = user.username || "";
   elements.userPassword.value = "";
   elements.userRole.value = user.role || "user";
-  setFeedback(elements.userFeedback, "");
+  setFeedback(elements.userFeedback, `Stai modificando l'account di ${user.fullName}.`);
   updateUserFormMode();
   switchTab("users");
+  focusUserForm();
 }
 
 function resetUserForm() {
@@ -804,6 +805,25 @@ function updateUserFormMode() {
     elements.userPassword.placeholder = "Nuova password opzionale";
   }
   updateUserLogoFieldState();
+}
+
+function focusUserForm() {
+  window.requestAnimationFrame(() => {
+    const formPanel = elements.userForm.closest(".panel");
+    if (formPanel) {
+      formPanel.classList.remove("form-spotlight");
+      void formPanel.offsetWidth;
+      formPanel.classList.add("form-spotlight");
+      window.setTimeout(() => formPanel.classList.remove("form-spotlight"), 1800);
+    }
+
+    elements.userForm.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+    elements.userFullName.focus();
+    elements.userFullName.select();
+  });
 }
 
 async function handleAppointmentListClick(event) {

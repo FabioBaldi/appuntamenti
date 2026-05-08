@@ -1,5 +1,7 @@
 .env
 node_modules/
 supabase/.temp/
-utilità/
+utilit*/
 data/
+.vercel/
+vercel-runtime*.log

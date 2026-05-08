@@ -169,6 +169,11 @@ button {
   padding: 28px;
 }
 
+.form-spotlight {
+  border-color: rgba(31, 160, 133, 0.45);
+  box-shadow: 0 0 0 4px rgba(31, 160, 133, 0.12), var(--shadow);
+}
+
 .split-panel {
   display: grid;
   grid-template-columns: 1fr 1fr;
