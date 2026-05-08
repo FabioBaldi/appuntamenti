@@ -1,4 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "outputDirectory": "public"
+  "framework": null,
+  "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api?__pathname=/api/$1"
+    },
+    {
+      "source": "/api",
+      "destination": "/api?__pathname=/api"
+    }
+  ]
 }
