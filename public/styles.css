@@ -447,6 +447,11 @@ textarea {
   color: #8f5a00;
 }
 
+.channel-mode-setup {
+  background: rgba(15, 143, 116, 0.14);
+  color: var(--accent-dark);
+}
+
 .channel-mode-off {
   background: rgba(24, 51, 44, 0.08);
   color: var(--ink-soft);

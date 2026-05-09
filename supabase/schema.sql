@@ -46,6 +46,18 @@ on public.app_users (owner_admin_id);
 create index if not exists app_users_created_by_user_idx
 on public.app_users (created_by_user_id);
 
+create table if not exists public.admin_channel_configs (
+  brand_owner_user_id uuid primary key references public.app_users(id) on delete cascade,
+  whatsapp_mode text not null default 'system' check (whatsapp_mode in ('system', 'meta_cloud')),
+  meta_access_token_encrypted text,
+  meta_phone_number_id text,
+  meta_waba_id text,
+  meta_business_account_id text,
+  meta_display_phone_number text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.appointments (
   id uuid primary key default gen_random_uuid(),
   title text not null,
@@ -85,6 +97,12 @@ on public.appointments (status);
 drop trigger if exists trg_app_users_updated_at on public.app_users;
 create trigger trg_app_users_updated_at
 before update on public.app_users
+for each row
+execute function public.set_updated_at();
+
+drop trigger if exists trg_admin_channel_configs_updated_at on public.admin_channel_configs;
+create trigger trg_admin_channel_configs_updated_at
+before update on public.admin_channel_configs
 for each row
 execute function public.set_updated_at();
 
@@ -140,4 +158,5 @@ where role = 'user'
   and created_by_user_id is null;
 
 alter table public.app_users enable row level security;
+alter table public.admin_channel_configs enable row level security;
 alter table public.appointments enable row level security;

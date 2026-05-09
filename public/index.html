@@ -372,13 +372,82 @@
                 </div>
                 <div class="steps">
                   <p>1. Copia <code>.env.example</code> in <code>.env</code>.</p>
-                  <p>2. Inserisci credenziali Resend per email e Twilio per SMS/WhatsApp.</p>
-                  <p>3. Riavvia il server per attivare gli invii reali.</p>
+                  <p>2. Inserisci credenziali Resend per email e Twilio per SMS.</p>
+                  <p>3. Per WhatsApp puoi tenere il provider attuale oppure usare Meta Cloud del cliente per ogni ramo admin.</p>
+                  <p>4. Riavvia il server per attivare gli invii reali.</p>
                   <p>
                     Se i provider non sono configurati, il sistema resta testabile in modalita mock e
                     simula gli invii senza dipendere da servizi esterni.
                   </p>
                 </div>
+              </section>
+
+              <section id="whatsappBranchPanel" class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">WhatsApp per ramo</span>
+                  <h3>Billing del cliente</h3>
+                </div>
+
+                <form id="whatsappBranchForm" class="stack-form">
+                  <label>
+                    <span>Modalita provider</span>
+                    <select id="whatsappProviderMode">
+                      <option value="system">Provider attuale della piattaforma</option>
+                      <option value="meta_cloud">Meta Cloud API del cliente</option>
+                    </select>
+                  </label>
+
+                  <p id="whatsappBranchModeHint" class="muted">
+                    Il ramo puo continuare a usare la configurazione WhatsApp attuale oppure passare a
+                    un account Meta del cliente.
+                  </p>
+
+                  <div id="whatsappMetaSettings" class="stack-form hidden">
+                    <label>
+                      <span>Meta access token permanente</span>
+                      <input
+                        id="whatsappMetaAccessToken"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="Inserisci un nuovo token solo se vuoi salvarlo o sostituirlo"
+                      />
+                    </label>
+
+                    <div class="field-grid two-columns">
+                      <label>
+                        <span>Phone Number ID</span>
+                        <input id="whatsappMetaPhoneNumberId" type="text" />
+                      </label>
+                      <label>
+                        <span>Numero WhatsApp visibile</span>
+                        <input id="whatsappMetaDisplayPhoneNumber" type="text" placeholder="+39..." />
+                      </label>
+                    </div>
+
+                    <div class="field-grid two-columns">
+                      <label>
+                        <span>WABA ID</span>
+                        <input id="whatsappMetaWabaId" type="text" />
+                      </label>
+                      <label>
+                        <span>Meta Business Account ID</span>
+                        <input id="whatsappMetaBusinessAccountId" type="text" />
+                      </label>
+                    </div>
+
+                    <p class="muted">
+                      Con questa modalita il costo dei messaggi WhatsApp resta sul metodo di pagamento
+                      configurato dal cliente nel suo account Meta.
+                    </p>
+                  </div>
+
+                  <div class="form-actions">
+                    <button id="whatsappBranchSaveButton" class="primary-button" type="submit">
+                      Salva configurazione WhatsApp
+                    </button>
+                  </div>
+                  <p id="whatsappBranchFeedback" class="feedback"></p>
+                </form>
               </section>
             </div>
           </section>

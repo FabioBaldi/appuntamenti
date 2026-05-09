@@ -24,6 +24,7 @@ const REMINDER_LOOP_INTERVAL_MS = 30 * 1000;
 const REMINDER_RETRY_MINUTES = Math.max(1, Number(process.env.REMINDER_RETRY_MINUTES || 15));
 const REMINDER_RETRY_MS = REMINDER_RETRY_MINUTES * 60 * 1000;
 const MAX_LOGO_DATA_URL_LENGTH = 800000;
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
@@ -39,7 +40,10 @@ const CONFIG = {
   supabaseSchema: process.env.SUPABASE_SCHEMA || "public",
   usersTable: "app_users",
   appointmentsTable: "appointments",
+  adminChannelConfigsTable: "admin_channel_configs",
   allowMockDelivery: parseBoolean(process.env.ALLOW_MOCK_DELIVERY, true),
+  credentialsSecret:
+    process.env.APP_CREDENTIALS_SECRET || process.env.SESSION_SECRET || "development-session-secret",
   email: {
     apiKey: process.env.RESEND_API_KEY || "",
     from: process.env.RESEND_FROM_EMAIL || ""
@@ -49,6 +53,9 @@ const CONFIG = {
     authToken: process.env.TWILIO_AUTH_TOKEN || "",
     smsFrom: process.env.TWILIO_SMS_FROM || "",
     whatsappFrom: process.env.TWILIO_WHATSAPP_FROM || ""
+  },
+  meta: {
+    graphVersion: META_GRAPH_VERSION
   }
 };
 
@@ -388,6 +395,14 @@ function getEffectiveAdminId(user) {
   return user.ownerAdminId || null;
 }
 
+function canManageBranchDeliveryConfig(user) {
+  return Boolean(user && user.role === "admin" && getEffectiveAdminId(user) === user.id);
+}
+
+function normalizeWhatsappProviderMode(value) {
+  return String(value || "").trim().toLowerCase() === "meta_cloud" ? "meta_cloud" : "system";
+}
+
 function buildRawUserMap(users) {
   return Object.fromEntries(users.map((entry) => [entry.id, entry]));
 }
@@ -496,7 +511,7 @@ async function handleApiRequest(req, res, url) {
       status: "ok",
       now: new Date().toISOString(),
       storage: "supabase",
-      delivery: getDeliveryStatus()
+      delivery: await getDeliveryStatusForUser(null)
     });
   }
 
@@ -519,7 +534,7 @@ async function handleApiRequest(req, res, url) {
     res.setHeader("Set-Cookie", serializeSessionCookie(user));
     return sendJson(res, 200, {
       user: publicUser,
-      delivery: getDeliveryStatus()
+      delivery: await getDeliveryStatusForUser(publicUser)
     });
   }
 
@@ -536,7 +551,7 @@ async function handleApiRequest(req, res, url) {
 
     return sendJson(res, 200, {
       user,
-      delivery: getDeliveryStatus()
+      delivery: await getDeliveryStatusForUser(user)
     });
   }
 
@@ -547,8 +562,41 @@ async function handleApiRequest(req, res, url) {
     }
 
     return sendJson(res, 200, {
-      delivery: getDeliveryStatus()
+      delivery: await getDeliveryStatusForUser(user)
     });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/settings/whatsapp-branch") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    if (!canManageBranchDeliveryConfig(user)) {
+      return sendJson(res, 403, {
+        error: "Solo l'admin proprietario del ramo puo configurare il canale WhatsApp del proprio account"
+      });
+    }
+
+    const body = await readJsonBody(req);
+    const existingConfig = await findAdminChannelConfigByBrandOwnerId(user.id);
+    const nextConfig = buildWhatsappBranchConfigPayload(body, user, existingConfig);
+
+    try {
+      if (nextConfig.whatsappMode === "meta_cloud") {
+        await validateMetaWhatsappConfig(nextConfig);
+      }
+
+      const savedConfig = await upsertAdminChannelConfig(nextConfig);
+      const users = await listUsers({ includeSecrets: false });
+      const userMap = buildRawUserMap(users);
+      return sendJson(res, 200, {
+        config: sanitizeAdminChannelConfig(savedConfig, userMap),
+        delivery: await getDeliveryStatusForUser(user)
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/users") {
@@ -1206,14 +1254,19 @@ function enrichAppointment(appointment, userMap) {
   };
 }
 
-function getDeliveryStatus() {
+async function getDeliveryStatusForUser(user) {
   const emailConfigured = Boolean(CONFIG.email.apiKey && CONFIG.email.from);
   const smsConfigured = Boolean(
     CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.smsFrom
   );
-  const whatsappConfigured = Boolean(
-    CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.whatsappFrom
-  );
+  const users = await listUsers({ includeSecrets: false });
+  const userMap = buildRawUserMap(users);
+  const effectiveAdminId = user ? getEffectiveAdminId(user) : null;
+  const branchOwner = effectiveAdminId ? userMap[effectiveAdminId] || null : null;
+  const rawConfig = effectiveAdminId
+    ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
+    : getDefaultAdminChannelConfig(null);
+  const whatsappStatus = resolveWhatsappChannelStatus(rawConfig);
 
   return {
     mockMode: CONFIG.allowMockDelivery,
@@ -1230,12 +1283,169 @@ function getDeliveryStatus() {
         mode: smsConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
       },
       whatsapp: {
-        configured: whatsappConfigured,
-        provider: whatsappConfigured ? "Twilio" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
-        mode: whatsappConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
+        configured: whatsappStatus.configured,
+        provider: whatsappStatus.provider,
+        mode: whatsappStatus.mode
       }
+    },
+    whatsappBranchConfig: {
+      ...sanitizeAdminChannelConfig(rawConfig, userMap),
+      canManage: canManageBranchDeliveryConfig(user),
+      branchOwnerId: effectiveAdminId,
+      branchOwnerName: branchOwner ? branchOwner.fullName : null,
+      usesClientBilling: rawConfig.whatsappMode === "meta_cloud"
     }
   };
+}
+
+function getDefaultAdminChannelConfig(brandOwnerUserId) {
+  return {
+    brandOwnerUserId: brandOwnerUserId || null,
+    whatsappMode: "system",
+    metaAccessTokenEncrypted: null,
+    metaPhoneNumberId: null,
+    metaWabaId: null,
+    metaBusinessAccountId: null,
+    metaDisplayPhoneNumber: null,
+    createdAt: null,
+    updatedAt: null
+  };
+}
+
+function sanitizeAdminChannelConfig(config, userMap) {
+  const branchOwner = config.brandOwnerUserId && userMap ? userMap[config.brandOwnerUserId] : null;
+  return {
+    brandOwnerUserId: config.brandOwnerUserId || null,
+    branchOwnerName: branchOwner ? branchOwner.fullName : null,
+    whatsappMode: normalizeWhatsappProviderMode(config.whatsappMode),
+    hasStoredMetaAccessToken: Boolean(config.metaAccessTokenEncrypted),
+    metaPhoneNumberId: config.metaPhoneNumberId || "",
+    metaWabaId: config.metaWabaId || "",
+    metaBusinessAccountId: config.metaBusinessAccountId || "",
+    metaDisplayPhoneNumber: config.metaDisplayPhoneNumber || "",
+    createdAt: config.createdAt || null,
+    updatedAt: config.updatedAt || null
+  };
+}
+
+function resolveWhatsappChannelStatus(config) {
+  const normalizedConfig = config || getDefaultAdminChannelConfig(null);
+  if (normalizedConfig.whatsappMode === "meta_cloud") {
+    const configured = hasMetaWhatsappConfiguration(normalizedConfig);
+    return {
+      configured,
+      provider: configured ? "Meta Cloud API (cliente)" : "Meta Cloud API",
+      mode: configured ? "live" : "setup"
+    };
+  }
+
+  const whatsappConfigured = Boolean(
+    CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.whatsappFrom
+  );
+
+  return {
+    configured: whatsappConfigured,
+    provider: whatsappConfigured ? "Twilio" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
+    mode: whatsappConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
+  };
+}
+
+function hasMetaWhatsappConfiguration(config) {
+  return Boolean(config && config.metaAccessTokenEncrypted && config.metaPhoneNumberId);
+}
+
+function buildWhatsappBranchConfigPayload(body, actor, existingConfig) {
+  const previous = existingConfig || getDefaultAdminChannelConfig(actor.id);
+  const now = new Date().toISOString();
+  const mode = normalizeWhatsappProviderMode(body.mode || previous.whatsappMode);
+  const nextConfig = {
+    brandOwnerUserId: actor.id,
+    whatsappMode: mode,
+    metaAccessTokenEncrypted: previous.metaAccessTokenEncrypted || null,
+    metaPhoneNumberId: String(body.metaPhoneNumberId ?? previous.metaPhoneNumberId ?? "").trim() || null,
+    metaWabaId: String(body.metaWabaId ?? previous.metaWabaId ?? "").trim() || null,
+    metaBusinessAccountId:
+      String(body.metaBusinessAccountId ?? previous.metaBusinessAccountId ?? "").trim() || null,
+    metaDisplayPhoneNumber:
+      String(body.metaDisplayPhoneNumber ?? previous.metaDisplayPhoneNumber ?? "").trim() || null,
+    createdAt: previous.createdAt || now,
+    updatedAt: now
+  };
+
+  const nextToken = String(body.metaAccessToken || "").trim();
+  if (nextToken) {
+    nextConfig.metaAccessTokenEncrypted = encryptSensitiveValue(nextToken);
+  }
+
+  return nextConfig;
+}
+
+async function validateMetaWhatsappConfig(config) {
+  if (!config.metaAccessTokenEncrypted) {
+    throw new Error("Inserisci un access token permanente di Meta per attivare il billing del cliente.");
+  }
+
+  if (!config.metaPhoneNumberId) {
+    throw new Error("Inserisci il Phone Number ID di Meta per il canale WhatsApp del cliente.");
+  }
+
+  const response = await fetch(
+    `https://graph.facebook.com/${CONFIG.meta.graphVersion}/${encodeURIComponent(
+      config.metaPhoneNumberId
+    )}?fields=display_phone_number,verified_name`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${decryptSensitiveValue(config.metaAccessTokenEncrypted)}`
+      }
+    }
+  );
+
+  const payload = await safeParseResponseJson(response);
+  if (!response.ok) {
+    const providerMessage =
+      payload.error?.message ||
+      payload.message ||
+      `Connessione Meta non valida (${response.status}). Controlla token e Phone Number ID.`;
+    throw new Error(
+      `Meta ha rifiutato la configurazione WhatsApp del cliente: ${providerMessage}`
+    );
+  }
+
+  if (!config.metaDisplayPhoneNumber && payload.display_phone_number) {
+    config.metaDisplayPhoneNumber = payload.display_phone_number;
+  }
+
+  return payload;
+}
+
+function encryptSensitiveValue(value) {
+  const iv = crypto.randomBytes(12);
+  const key = crypto.createHash("sha256").update(CONFIG.credentialsSecret).digest();
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return [iv.toString("base64"), authTag.toString("base64"), ciphertext.toString("base64")].join(".");
+}
+
+function decryptSensitiveValue(value) {
+  if (!value) {
+    return "";
+  }
+
+  const parts = String(value).split(".");
+  if (parts.length !== 3) {
+    return String(value);
+  }
+
+  const [ivText, authTagText, cipherText] = parts;
+  const iv = Buffer.from(ivText, "base64");
+  const authTag = Buffer.from(authTagText, "base64");
+  const encrypted = Buffer.from(cipherText, "base64");
+  const key = crypto.createHash("sha256").update(CONFIG.credentialsSecret).digest();
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
 function buildReminderText(appointment) {
@@ -1371,14 +1581,29 @@ async function sendNotificationChannel(channel, appointment, subject, message) {
   }
 
   if (channel === "whatsapp") {
-    if (CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.whatsappFrom) {
-      return sendTwilioMessage({
-        to: ensureWhatsappPrefix(appointment.clientPhone),
-        from: ensureWhatsappPrefix(CONFIG.twilio.whatsappFrom),
+    const whatsappDelivery = await resolveWhatsappDeliveryConfigForAppointment(appointment);
+    if (whatsappDelivery.kind === "meta_cloud") {
+      return sendMetaWhatsappMessage({
+        accessToken: whatsappDelivery.accessToken,
+        phoneNumberId: whatsappDelivery.phoneNumberId,
+        to: appointment.clientPhone,
         body: message
       });
     }
-    return sendMockNotification("whatsapp", appointment.clientPhone, message);
+
+    if (whatsappDelivery.kind === "system_twilio") {
+      return sendTwilioMessage({
+        to: ensureWhatsappPrefix(appointment.clientPhone),
+        from: ensureWhatsappPrefix(whatsappDelivery.from),
+        body: message
+      });
+    }
+
+    if (whatsappDelivery.kind === "mock") {
+      return sendMockNotification("whatsapp", appointment.clientPhone, message);
+    }
+
+    throw new Error(whatsappDelivery.error || "Canale WhatsApp non configurato");
   }
 
   throw new Error("Canale reminder non supportato");
@@ -1457,6 +1682,90 @@ async function sendTwilioMessage({ to, from, body }) {
   };
 }
 
+async function resolveWhatsappDeliveryConfigForAppointment(appointment) {
+  const assignedUser = await findUserById(appointment.assignedUserId);
+  if (!assignedUser) {
+    return {
+      kind: "error",
+      error: "Utente assegnato non trovato per il reminder WhatsApp"
+    };
+  }
+
+  const effectiveAdminId = getEffectiveAdminId(assignedUser);
+  const branchConfig = effectiveAdminId
+    ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
+    : getDefaultAdminChannelConfig(null);
+
+  if (branchConfig.whatsappMode === "meta_cloud") {
+    if (!hasMetaWhatsappConfiguration(branchConfig)) {
+      return {
+        kind: "error",
+        error:
+          "Il ramo admin assegnato usa WhatsApp del cliente, ma la configurazione Meta Cloud non e ancora completa"
+      };
+    }
+
+    return {
+      kind: "meta_cloud",
+      accessToken: decryptSensitiveValue(branchConfig.metaAccessTokenEncrypted),
+      phoneNumberId: branchConfig.metaPhoneNumberId
+    };
+  }
+
+  if (CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.whatsappFrom) {
+    return {
+      kind: "system_twilio",
+      from: CONFIG.twilio.whatsappFrom
+    };
+  }
+
+  if (CONFIG.allowMockDelivery) {
+    return {
+      kind: "mock"
+    };
+  }
+
+  return {
+    kind: "error",
+    error: "Canale WhatsApp non configurato"
+  };
+}
+
+async function sendMetaWhatsappMessage({ accessToken, phoneNumberId, to, body }) {
+  const endpoint = `https://graph.facebook.com/${CONFIG.meta.graphVersion}/${encodeURIComponent(
+    phoneNumberId
+  )}/messages`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: normalizePhoneForMeta(to),
+      type: "text",
+      text: {
+        preview_url: false,
+        body
+      }
+    })
+  });
+
+  const payload = await safeParseResponseJson(response);
+  if (!response.ok) {
+    throw new Error(
+      payload.error?.message || payload.message || `Messaggio WhatsApp Meta non inviato (${response.status})`
+    );
+  }
+
+  return {
+    provider: "Meta Cloud API",
+    mode: "live",
+    messageId: payload.messages && payload.messages[0] ? payload.messages[0].id || null : null
+  };
+}
+
 async function safeParseResponseJson(response) {
   try {
     return await response.json();
@@ -1471,6 +1780,13 @@ function ensureWhatsappPrefix(value) {
     return trimmed;
   }
   return trimmed.startsWith("whatsapp:") ? trimmed : `whatsapp:${trimmed}`;
+}
+
+function normalizePhoneForMeta(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^whatsapp:/i, "")
+    .replace(/[^\d]/g, "");
 }
 
 async function serveStatic(req, res, url) {
@@ -1521,7 +1837,15 @@ function buildQuery(params) {
   return searchParams.toString();
 }
 
-async function supabaseRequest({ method = "GET", table, query = "", body, single = false, returnRows = false }) {
+async function supabaseRequest({
+  method = "GET",
+  table,
+  query = "",
+  body,
+  single = false,
+  returnRows = false,
+  prefer = []
+}) {
   const headers = {
     apikey: CONFIG.supabaseKey,
     Authorization: `Bearer ${CONFIG.supabaseKey}`,
@@ -1535,8 +1859,13 @@ async function supabaseRequest({ method = "GET", table, query = "", body, single
     headers["Content-Type"] = "application/json";
   }
 
+  const preferValues = Array.isArray(prefer) ? [...prefer] : prefer ? [String(prefer)] : [];
   if (returnRows) {
-    headers.Prefer = "return=representation";
+    preferValues.push("return=representation");
+  }
+
+  if (preferValues.length) {
+    headers.Prefer = preferValues.join(",");
   }
 
   const response = await fetch(`${SUPABASE_REST_URL}/${table}${query ? `?${query}` : ""}`, {
@@ -1656,6 +1985,42 @@ async function deleteUserRecord(userId) {
       id: `eq.${userId}`
     })
   });
+}
+
+async function findAdminChannelConfigByBrandOwnerId(brandOwnerUserId) {
+  if (!brandOwnerUserId) {
+    return getDefaultAdminChannelConfig(null);
+  }
+
+  const rows = await supabaseRequest({
+    table: CONFIG.adminChannelConfigsTable,
+    query: buildQuery({
+      select: "*",
+      brand_owner_user_id: `eq.${brandOwnerUserId}`,
+      limit: 1
+    })
+  });
+
+  if (!Array.isArray(rows) || !rows.length) {
+    return getDefaultAdminChannelConfig(brandOwnerUserId);
+  }
+
+  return adminChannelConfigFromRow(rows[0]);
+}
+
+async function upsertAdminChannelConfig(config) {
+  const rows = await supabaseRequest({
+    method: "POST",
+    table: CONFIG.adminChannelConfigsTable,
+    query: buildQuery({
+      on_conflict: "brand_owner_user_id"
+    }),
+    body: adminChannelConfigToRow(config),
+    returnRows: true,
+    prefer: ["resolution=merge-duplicates"]
+  });
+
+  return adminChannelConfigFromRow(Array.isArray(rows) ? rows[0] : rows);
 }
 
 async function userHasDependents(userId) {
@@ -1780,6 +2145,34 @@ function userToRow(user) {
     password_salt: user.passwordSalt,
     created_at: user.createdAt,
     updated_at: user.updatedAt
+  };
+}
+
+function adminChannelConfigFromRow(row) {
+  return {
+    brandOwnerUserId: row.brand_owner_user_id,
+    whatsappMode: normalizeWhatsappProviderMode(row.whatsapp_mode),
+    metaAccessTokenEncrypted: row.meta_access_token_encrypted || null,
+    metaPhoneNumberId: row.meta_phone_number_id || null,
+    metaWabaId: row.meta_waba_id || null,
+    metaBusinessAccountId: row.meta_business_account_id || null,
+    metaDisplayPhoneNumber: row.meta_display_phone_number || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function adminChannelConfigToRow(config) {
+  return {
+    brand_owner_user_id: config.brandOwnerUserId,
+    whatsapp_mode: normalizeWhatsappProviderMode(config.whatsappMode),
+    meta_access_token_encrypted: config.metaAccessTokenEncrypted || null,
+    meta_phone_number_id: config.metaPhoneNumberId || null,
+    meta_waba_id: config.metaWabaId || null,
+    meta_business_account_id: config.metaBusinessAccountId || null,
+    meta_display_phone_number: config.metaDisplayPhoneNumber || null,
+    created_at: config.createdAt,
+    updated_at: config.updatedAt
   };
 }
 

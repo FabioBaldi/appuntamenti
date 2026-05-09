@@ -73,6 +73,18 @@ function cacheElements() {
     "userFeedback",
     "usersList",
     "deliveryChannels",
+    "whatsappBranchPanel",
+    "whatsappBranchForm",
+    "whatsappProviderMode",
+    "whatsappBranchModeHint",
+    "whatsappMetaSettings",
+    "whatsappMetaAccessToken",
+    "whatsappMetaPhoneNumberId",
+    "whatsappMetaDisplayPhoneNumber",
+    "whatsappMetaWabaId",
+    "whatsappMetaBusinessAccountId",
+    "whatsappBranchSaveButton",
+    "whatsappBranchFeedback",
     "brandingPanel",
     "brandingManagerSection",
     "brandingForm",
@@ -100,6 +112,8 @@ function bindEvents() {
   elements.userCancelEdit.addEventListener("click", resetUserForm);
   elements.userRole.addEventListener("change", updateUserLogoFieldState);
   elements.reminderEnabled.addEventListener("change", updateReminderFieldsState);
+  elements.whatsappBranchForm.addEventListener("submit", handleWhatsappBranchSubmit);
+  elements.whatsappProviderMode.addEventListener("change", updateWhatsappProviderModeFields);
   elements.brandingForm.addEventListener("submit", handleBrandingSubmit);
   elements.removeBrandingButton.addEventListener("click", handleBrandingRemove);
   elements.brandingTargetAdminId.addEventListener("change", renderBrandingManager);
@@ -204,6 +218,7 @@ function render() {
   renderDashboard();
   renderUsers();
   renderDelivery();
+  renderWhatsappBranchSettings();
   renderAppointments();
   renderBrandingManager();
   updateReminderFieldsState();
@@ -529,19 +544,29 @@ function renderDelivery() {
   elements.deliveryChannels.innerHTML = Object.entries(state.delivery.channels)
     .map(([channel, config]) => {
       const modeLabel =
-        config.mode === "live" ? "Attivo" : config.mode === "mock" ? "Mock locale" : "Disattivo";
+        config.mode === "live"
+          ? "Attivo"
+          : config.mode === "mock"
+            ? "Mock locale"
+            : config.mode === "setup"
+              ? "Da completare"
+              : "Disattivo";
       const modeClass =
         config.mode === "live"
           ? "channel-mode-live"
           : config.mode === "mock"
             ? "channel-mode-mock"
-            : "channel-mode-off";
+            : config.mode === "setup"
+              ? "channel-mode-setup"
+              : "channel-mode-off";
       const description =
         config.mode === "live"
           ? "Invio reale attivo tramite provider configurato."
           : config.mode === "mock"
             ? "Invio simulato per test interni, senza spedizione reale."
-            : "Canale non configurato. Nessun invio disponibile.";
+            : config.mode === "setup"
+              ? "Il canale e impostato sul provider del cliente ma i dati Meta non sono ancora completi."
+              : "Canale non configurato. Nessun invio disponibile.";
 
       return `
         <article class="channel-card">
@@ -561,6 +586,61 @@ function renderDelivery() {
       `;
     })
     .join("");
+}
+
+function renderWhatsappBranchSettings() {
+  const branchConfig = state.delivery && state.delivery.whatsappBranchConfig;
+  if (!branchConfig) {
+    elements.whatsappBranchPanel.classList.add("hidden");
+    return;
+  }
+
+  elements.whatsappBranchPanel.classList.remove("hidden");
+  elements.whatsappProviderMode.value = branchConfig.whatsappMode || "system";
+  elements.whatsappMetaPhoneNumberId.value = branchConfig.metaPhoneNumberId || "";
+  elements.whatsappMetaDisplayPhoneNumber.value = branchConfig.metaDisplayPhoneNumber || "";
+  elements.whatsappMetaWabaId.value = branchConfig.metaWabaId || "";
+  elements.whatsappMetaBusinessAccountId.value = branchConfig.metaBusinessAccountId || "";
+  elements.whatsappMetaAccessToken.value = "";
+  elements.whatsappMetaAccessToken.placeholder = branchConfig.hasStoredMetaAccessToken
+    ? "Gia salvato. Inseriscine uno nuovo solo se vuoi sostituirlo."
+    : "Incolla qui il token permanente di Meta";
+
+  const managedByName = branchConfig.branchOwnerName || "l'admin del ramo";
+  if (branchConfig.canManage) {
+    elements.whatsappBranchModeHint.textContent =
+      branchConfig.whatsappMode === "meta_cloud"
+        ? "Questo ramo usa il proprio account Meta: i costi WhatsApp restano sul cliente. Puoi tornare al provider attuale in qualsiasi momento."
+        : "Questo ramo sta usando il provider WhatsApp attuale della piattaforma. Se vuoi, puoi passare all'account Meta del cliente senza perdere il fallback.";
+  } else {
+    elements.whatsappBranchModeHint.textContent =
+      branchConfig.whatsappMode === "meta_cloud"
+        ? `Il canale WhatsApp di questo ramo e gestito da ${managedByName} con billing diretto del cliente.`
+        : `Il canale WhatsApp di questo ramo usa ancora il provider attuale della piattaforma ed e gestito da ${managedByName}.`;
+  }
+
+  elements.whatsappBranchForm
+    .querySelectorAll("input, select, button")
+    .forEach((field) => (field.disabled = !branchConfig.canManage));
+
+  updateWhatsappProviderModeFields();
+}
+
+function updateWhatsappProviderModeFields() {
+  const branchConfig = state.delivery && state.delivery.whatsappBranchConfig;
+  const showMetaSettings = elements.whatsappProviderMode.value === "meta_cloud";
+  elements.whatsappMetaSettings.classList.toggle("hidden", !showMetaSettings);
+
+  if (!branchConfig || !branchConfig.canManage) {
+    elements.whatsappBranchSaveButton.textContent = "Configurazione gestita dal ramo";
+    return;
+  }
+
+  if (showMetaSettings) {
+    elements.whatsappBranchSaveButton.textContent = "Attiva Meta Cloud del cliente";
+  } else {
+    elements.whatsappBranchSaveButton.textContent = "Ripristina provider attuale";
+  }
 }
 
 function formatChannelLabel(channel) {
@@ -709,6 +789,38 @@ async function handleUsersListClick(event) {
     } catch (error) {
       window.alert(error.message);
     }
+  }
+}
+
+async function handleWhatsappBranchSubmit(event) {
+  event.preventDefault();
+  setFeedback(elements.whatsappBranchFeedback, "");
+
+  try {
+    const mode = elements.whatsappProviderMode.value;
+    const response = await api("/api/settings/whatsapp-branch", {
+      method: "PUT",
+      body: {
+        mode,
+        metaAccessToken: elements.whatsappMetaAccessToken.value,
+        metaPhoneNumberId: elements.whatsappMetaPhoneNumberId.value,
+        metaDisplayPhoneNumber: elements.whatsappMetaDisplayPhoneNumber.value,
+        metaWabaId: elements.whatsappMetaWabaId.value,
+        metaBusinessAccountId: elements.whatsappMetaBusinessAccountId.value
+      }
+    });
+
+    state.delivery = response.delivery;
+    renderDelivery();
+    renderWhatsappBranchSettings();
+    setFeedback(
+      elements.whatsappBranchFeedback,
+      mode === "meta_cloud"
+        ? "WhatsApp del cliente attivato. Da ora questo ramo usa Meta Cloud API con billing diretto sul cliente."
+        : "Ripristinato il provider WhatsApp attuale della piattaforma per questo ramo."
+    );
+  } catch (error) {
+    setFeedback(elements.whatsappBranchFeedback, error.message, true);
   }
 }
 
