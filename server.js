@@ -25,6 +25,9 @@ const REMINDER_RETRY_MINUTES = Math.max(1, Number(process.env.REMINDER_RETRY_MIN
 const REMINDER_RETRY_MS = REMINDER_RETRY_MINUTES * 60 * 1000;
 const MAX_LOGO_DATA_URL_LENGTH = 800000;
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
+const DEFAULT_WALLET_CURRENCY = "EUR";
+const DEFAULT_SMS_UNIT_PRICE = 0.08;
+const DEFAULT_WHATSAPP_UNIT_PRICE = 0.12;
 
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
@@ -403,6 +406,10 @@ function normalizeWhatsappProviderMode(value) {
   return String(value || "").trim().toLowerCase() === "meta_cloud" ? "meta_cloud" : "system";
 }
 
+function normalizeBillingModel(value) {
+  return String(value || "").trim().toLowerCase() === "wallet" ? "wallet" : "platform";
+}
+
 function buildRawUserMap(users) {
   return Object.fromEntries(users.map((entry) => [entry.id, entry]));
 }
@@ -566,7 +573,30 @@ async function handleApiRequest(req, res, url) {
     });
   }
 
-  if (req.method === "PUT" && url.pathname === "/api/settings/whatsapp-branch") {
+  if (req.method === "GET" && url.pathname === "/api/settings/branch-config") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(user, url.searchParams.get("targetAdminId"));
+      const users = await listUsers({ includeSecrets: false });
+      const userMap = buildRawUserMap(users);
+      const config = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+      return sendJson(res, 200, {
+        config: sanitizeAdminChannelConfig(config, userMap, targetBranchOwner),
+        targetAdmin: sanitizeUser(targetBranchOwner, userMap)
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (
+    req.method === "PUT" &&
+    ["/api/settings/branch-messaging", "/api/settings/whatsapp-branch"].includes(url.pathname)
+  ) {
     const user = await requireAdmin(req, res);
     if (!user) {
       return;
@@ -574,13 +604,13 @@ async function handleApiRequest(req, res, url) {
 
     if (!canManageBranchDeliveryConfig(user)) {
       return sendJson(res, 403, {
-        error: "Solo l'admin proprietario del ramo puo configurare il canale WhatsApp del proprio account"
+        error: "Solo l'admin proprietario del ramo puo configurare il profilo messaggi del proprio account"
       });
     }
 
     const body = await readJsonBody(req);
     const existingConfig = await findAdminChannelConfigByBrandOwnerId(user.id);
-    const nextConfig = buildWhatsappBranchConfigPayload(body, user, existingConfig);
+    const nextConfig = buildBranchMessagingConfigPayload(body, user, existingConfig);
 
     try {
       if (nextConfig.whatsappMode === "meta_cloud") {
@@ -591,7 +621,40 @@ async function handleApiRequest(req, res, url) {
       const users = await listUsers({ includeSecrets: false });
       const userMap = buildRawUserMap(users);
       return sendJson(res, 200, {
-        config: sanitizeAdminChannelConfig(savedConfig, userMap),
+        config: sanitizeAdminChannelConfig(savedConfig, userMap, user),
+        delivery: await getDeliveryStatusForUser(user)
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/settings/branch-billing") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    if (!user.isPlatformOwner) {
+      return sendJson(res, 403, {
+        error: "Solo l'admin principale puo aggiornare saldo e listino dei rami"
+      });
+    }
+
+    const body = await readJsonBody(req);
+
+    try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+        user,
+        String(body.targetAdminId || "").trim()
+      );
+      const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+      const nextConfig = buildBranchBillingConfigPayload(body, targetBranchOwner, existingConfig);
+      const savedConfig = await upsertAdminChannelConfig(nextConfig);
+      const users = await listUsers({ includeSecrets: false });
+      const userMap = buildRawUserMap(users);
+      return sendJson(res, 200, {
+        config: sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
         delivery: await getDeliveryStatusForUser(user)
       });
     } catch (error) {
@@ -1152,6 +1215,40 @@ function normalizeLogoDataUrl(value) {
   return normalized;
 }
 
+function normalizeMoney(value, fallback = 0) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized < 0) {
+    return fallback;
+  }
+  return Math.round(normalized * 100) / 100;
+}
+
+function normalizeUnitPrice(value, fallback) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized < 0) {
+    return fallback;
+  }
+  return Math.round(normalized * 10000) / 10000;
+}
+
+function deriveSmsSenderId(value) {
+  const ascii = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = ascii.replace(/\s+/g, "");
+  if (!compact || !/[A-Za-z]/.test(compact)) {
+    return "";
+  }
+  return compact.slice(0, 11);
+}
+
+function supportsAlphanumericSmsSender(phoneNumber) {
+  return String(phoneNumber || "").trim().startsWith("+39");
+}
+
 function buildReminderFingerprint(appointment) {
   return JSON.stringify({
     status: appointment.status,
@@ -1256,17 +1353,27 @@ function enrichAppointment(appointment, userMap) {
 
 async function getDeliveryStatusForUser(user) {
   const emailConfigured = Boolean(CONFIG.email.apiKey && CONFIG.email.from);
-  const smsConfigured = Boolean(
-    CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.smsFrom
-  );
   const users = await listUsers({ includeSecrets: false });
   const userMap = buildRawUserMap(users);
   const effectiveAdminId = user ? getEffectiveAdminId(user) : null;
   const branchOwner = effectiveAdminId ? userMap[effectiveAdminId] || null : null;
   const rawConfig = effectiveAdminId
     ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
-    : getDefaultAdminChannelConfig(null);
+    : getDefaultAdminChannelConfig(null, null);
+  const branchConfig = sanitizeAdminChannelConfig(rawConfig, userMap, branchOwner);
+  const smsConfigured = Boolean(
+    CONFIG.twilio.accountSid &&
+      CONFIG.twilio.authToken &&
+      (CONFIG.twilio.smsFrom || branchConfig.smsSenderId)
+  );
   const whatsappStatus = resolveWhatsappChannelStatus(rawConfig);
+  const smsProvider = smsConfigured
+    ? branchConfig.smsSenderId
+      ? `Mittente ramo: ${branchConfig.smsSenderId}`
+      : "Numero piattaforma"
+    : CONFIG.allowMockDelivery
+      ? "Mock"
+      : "Non configurato";
 
   return {
     mockMode: CONFIG.allowMockDelivery,
@@ -1279,7 +1386,7 @@ async function getDeliveryStatusForUser(user) {
       },
       sms: {
         configured: smsConfigured,
-        provider: smsConfigured ? "Twilio" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
+        provider: smsProvider,
         mode: smsConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
       },
       whatsapp: {
@@ -1288,8 +1395,16 @@ async function getDeliveryStatusForUser(user) {
         mode: whatsappStatus.mode
       }
     },
+    branchMessagingConfig: {
+      ...branchConfig,
+      canManageMessaging: canManageBranchDeliveryConfig(user),
+      canManageBilling: Boolean(user && user.isPlatformOwner),
+      branchOwnerId: effectiveAdminId,
+      branchOwnerName: branchOwner ? branchOwner.fullName : null,
+      usesClientBilling: rawConfig.whatsappMode === "meta_cloud"
+    },
     whatsappBranchConfig: {
-      ...sanitizeAdminChannelConfig(rawConfig, userMap),
+      ...branchConfig,
       canManage: canManageBranchDeliveryConfig(user),
       branchOwnerId: effectiveAdminId,
       branchOwnerName: branchOwner ? branchOwner.fullName : null,
@@ -1298,31 +1413,52 @@ async function getDeliveryStatusForUser(user) {
   };
 }
 
-function getDefaultAdminChannelConfig(brandOwnerUserId) {
+function getDefaultAdminChannelConfig(brandOwnerUserId, branchOwnerUser) {
+  const fallbackBusinessName = branchOwnerUser ? branchOwnerUser.fullName || "" : "";
   return {
     brandOwnerUserId: brandOwnerUserId || null,
+    businessDisplayName: fallbackBusinessName,
+    smsSenderId: "",
     whatsappMode: "system",
     metaAccessTokenEncrypted: null,
     metaPhoneNumberId: null,
     metaWabaId: null,
     metaBusinessAccountId: null,
     metaDisplayPhoneNumber: null,
+    billingModel: "platform",
+    walletBalance: 0,
+    walletCurrency: DEFAULT_WALLET_CURRENCY,
+    smsUnitPrice: DEFAULT_SMS_UNIT_PRICE,
+    whatsappUnitPrice: DEFAULT_WHATSAPP_UNIT_PRICE,
     createdAt: null,
     updatedAt: null
   };
 }
 
-function sanitizeAdminChannelConfig(config, userMap) {
-  const branchOwner = config.brandOwnerUserId && userMap ? userMap[config.brandOwnerUserId] : null;
+function sanitizeAdminChannelConfig(config, userMap, explicitBranchOwner) {
+  const branchOwner =
+    explicitBranchOwner || (config.brandOwnerUserId && userMap ? userMap[config.brandOwnerUserId] : null);
+  const businessDisplayName = String(config.businessDisplayName || branchOwner?.fullName || "").trim();
+  const suggestedSmsSenderId = deriveSmsSenderId(businessDisplayName || branchOwner?.fullName || "");
+  const smsSenderId = String(config.smsSenderId || "").trim() || suggestedSmsSenderId;
   return {
     brandOwnerUserId: config.brandOwnerUserId || null,
     branchOwnerName: branchOwner ? branchOwner.fullName : null,
+    businessDisplayName,
+    smsSenderId,
+    suggestedSmsSenderId,
     whatsappMode: normalizeWhatsappProviderMode(config.whatsappMode),
     hasStoredMetaAccessToken: Boolean(config.metaAccessTokenEncrypted),
     metaPhoneNumberId: config.metaPhoneNumberId || "",
     metaWabaId: config.metaWabaId || "",
     metaBusinessAccountId: config.metaBusinessAccountId || "",
     metaDisplayPhoneNumber: config.metaDisplayPhoneNumber || "",
+    billingModel: normalizeBillingModel(config.billingModel),
+    walletBalance: normalizeMoney(config.walletBalance || 0, 0),
+    walletCurrency: config.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    smsUnitPrice: normalizeUnitPrice(config.smsUnitPrice, DEFAULT_SMS_UNIT_PRICE),
+    whatsappUnitPrice: normalizeUnitPrice(config.whatsappUnitPrice, DEFAULT_WHATSAPP_UNIT_PRICE),
+    sharedWhatsappSender: CONFIG.twilio.whatsappFrom || "",
     createdAt: config.createdAt || null,
     updatedAt: config.updatedAt || null
   };
@@ -1334,7 +1470,7 @@ function resolveWhatsappChannelStatus(config) {
     const configured = hasMetaWhatsappConfiguration(normalizedConfig);
     return {
       configured,
-      provider: configured ? "Meta Cloud API (cliente)" : "Meta Cloud API",
+      provider: configured ? "Numero dedicato del cliente" : "Premium da completare",
       mode: configured ? "live" : "setup"
     };
   }
@@ -1345,7 +1481,7 @@ function resolveWhatsappChannelStatus(config) {
 
   return {
     configured: whatsappConfigured,
-    provider: whatsappConfigured ? "Twilio" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
+    provider: whatsappConfigured ? "Numero condiviso piattaforma" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
     mode: whatsappConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
   };
 }
@@ -1354,12 +1490,24 @@ function hasMetaWhatsappConfiguration(config) {
   return Boolean(config && config.metaAccessTokenEncrypted && config.metaPhoneNumberId);
 }
 
-function buildWhatsappBranchConfigPayload(body, actor, existingConfig) {
-  const previous = existingConfig || getDefaultAdminChannelConfig(actor.id);
+function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
+  const previous = existingConfig || getDefaultAdminChannelConfig(actor.id, actor);
   const now = new Date().toISOString();
   const mode = normalizeWhatsappProviderMode(body.mode || previous.whatsappMode);
+  const requestedBusinessName = String(body.businessDisplayName ?? previous.businessDisplayName ?? "")
+    .trim()
+    .slice(0, 80);
+  const businessDisplayName = requestedBusinessName || actor.fullName;
+  const requestedSmsSender = String(body.smsSenderId ?? previous.smsSenderId ?? "").trim();
+  const smsSenderId = deriveSmsSenderId(requestedSmsSender || businessDisplayName);
+  if (!businessDisplayName) {
+    throw new Error("Inserisci un nome attivita per personalizzare i remind del ramo.");
+  }
+
   const nextConfig = {
     brandOwnerUserId: actor.id,
+    businessDisplayName,
+    smsSenderId,
     whatsappMode: mode,
     metaAccessTokenEncrypted: previous.metaAccessTokenEncrypted || null,
     metaPhoneNumberId: String(body.metaPhoneNumberId ?? previous.metaPhoneNumberId ?? "").trim() || null,
@@ -1368,6 +1516,11 @@ function buildWhatsappBranchConfigPayload(body, actor, existingConfig) {
       String(body.metaBusinessAccountId ?? previous.metaBusinessAccountId ?? "").trim() || null,
     metaDisplayPhoneNumber:
       String(body.metaDisplayPhoneNumber ?? previous.metaDisplayPhoneNumber ?? "").trim() || null,
+    billingModel: normalizeBillingModel(previous.billingModel),
+    walletBalance: normalizeMoney(previous.walletBalance || 0, 0),
+    walletCurrency: previous.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    smsUnitPrice: normalizeUnitPrice(previous.smsUnitPrice, DEFAULT_SMS_UNIT_PRICE),
+    whatsappUnitPrice: normalizeUnitPrice(previous.whatsappUnitPrice, DEFAULT_WHATSAPP_UNIT_PRICE),
     createdAt: previous.createdAt || now,
     updatedAt: now
   };
@@ -1378,6 +1531,46 @@ function buildWhatsappBranchConfigPayload(body, actor, existingConfig) {
   }
 
   return nextConfig;
+}
+
+function buildBranchBillingConfigPayload(body, targetBranchOwner, existingConfig) {
+  const previous = existingConfig || getDefaultAdminChannelConfig(targetBranchOwner.id, targetBranchOwner);
+  return {
+    ...previous,
+    brandOwnerUserId: targetBranchOwner.id,
+    businessDisplayName: previous.businessDisplayName || targetBranchOwner.fullName,
+    smsSenderId: previous.smsSenderId || deriveSmsSenderId(previous.businessDisplayName || targetBranchOwner.fullName),
+    billingModel: normalizeBillingModel(body.billingModel || previous.billingModel),
+    walletBalance: normalizeMoney(body.walletBalance, normalizeMoney(previous.walletBalance || 0, 0)),
+    walletCurrency: previous.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    smsUnitPrice: normalizeUnitPrice(body.smsUnitPrice, normalizeUnitPrice(previous.smsUnitPrice, DEFAULT_SMS_UNIT_PRICE)),
+    whatsappUnitPrice: normalizeUnitPrice(
+      body.whatsappUnitPrice,
+      normalizeUnitPrice(previous.whatsappUnitPrice, DEFAULT_WHATSAPP_UNIT_PRICE)
+    ),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function resolveBranchOwnerForSettingsRequest(actor, targetAdminId) {
+  const resolvedTargetId = String(targetAdminId || "").trim();
+  if (!resolvedTargetId) {
+    if (!canManageBranchDeliveryConfig(actor)) {
+      throw new Error("Seleziona un account admin proprietario di ramo da gestire.");
+    }
+    return actor;
+  }
+
+  const targetUser = await findUserById(resolvedTargetId);
+  if (!targetUser || targetUser.role !== "admin" || targetUser.ownerAdminId !== targetUser.id) {
+    throw new Error("Seleziona un admin proprietario di ramo valido.");
+  }
+
+  if (!actor.isPlatformOwner && actor.id !== targetUser.id) {
+    throw new Error("Non puoi gestire il profilo messaggi di un altro ramo.");
+  }
+
+  return targetUser;
 }
 
 async function validateMetaWhatsappConfig(config) {
@@ -1448,7 +1641,26 @@ function decryptSensitiveValue(value) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
-function buildReminderText(appointment) {
+function prependBusinessHeader(message, businessDisplayName) {
+  const normalizedBusinessName = String(businessDisplayName || "").trim();
+  const normalizedMessage = String(message || "").trim();
+
+  if (!normalizedBusinessName) {
+    return normalizedMessage;
+  }
+
+  if (!normalizedMessage) {
+    return normalizedBusinessName;
+  }
+
+  if (normalizedMessage.toLowerCase().startsWith(normalizedBusinessName.toLowerCase())) {
+    return normalizedMessage;
+  }
+
+  return `${normalizedBusinessName}\n\n${normalizedMessage}`;
+}
+
+function buildReminderText(appointment, branchConfig) {
   const formattedDate = new Intl.DateTimeFormat("it-IT", {
     dateStyle: "full",
     timeStyle: "short",
@@ -1466,7 +1678,8 @@ function buildReminderText(appointment) {
     .filter(Boolean)
     .join("\n");
 
-  return appointment.reminderMessage || baseMessage;
+  const messageBody = appointment.reminderMessage || baseMessage;
+  return prependBusinessHeader(messageBody, branchConfig && branchConfig.businessDisplayName);
 }
 
 async function processDueReminders() {
@@ -1497,12 +1710,19 @@ async function dispatchReminderForAppointment(appointment, options) {
     : getPendingReminderChannels(appointment);
 
   const results = [];
-  const message = buildReminderText(appointment);
+  const deliveryContext = await resolveBranchMessagingContextForAppointment(appointment);
+  const message = buildReminderText(appointment, deliveryContext.branchConfig);
   const subject = `Promemoria appuntamento: ${appointment.title}`;
 
   for (const channel of channels) {
     try {
-      const deliveryResult = await sendNotificationChannel(channel, appointment, subject, message);
+      const deliveryResult = await sendNotificationChannel(
+        channel,
+        appointment,
+        subject,
+        message,
+        deliveryContext
+      );
       results.push({
         channel,
         status: "sent",
@@ -1561,7 +1781,7 @@ function mergeReminderResults(appointment, results) {
   };
 }
 
-async function sendNotificationChannel(channel, appointment, subject, message) {
+async function sendNotificationChannel(channel, appointment, subject, message, deliveryContext) {
   if (channel === "email") {
     if (CONFIG.email.apiKey && CONFIG.email.from) {
       return sendEmailNotification(appointment.clientEmail, subject, message);
@@ -1570,18 +1790,27 @@ async function sendNotificationChannel(channel, appointment, subject, message) {
   }
 
   if (channel === "sms") {
-    if (CONFIG.twilio.accountSid && CONFIG.twilio.authToken && CONFIG.twilio.smsFrom) {
+    const smsDelivery = await resolveSmsDeliveryConfigForAppointment(appointment, deliveryContext);
+    if (smsDelivery.kind === "twilio") {
       return sendTwilioMessage({
         to: appointment.clientPhone,
-        from: CONFIG.twilio.smsFrom,
+        from: smsDelivery.from,
         body: message
       });
     }
-    return sendMockNotification("sms", appointment.clientPhone, message);
+
+    if (smsDelivery.kind === "mock") {
+      return sendMockNotification("sms", appointment.clientPhone, message);
+    }
+
+    throw new Error(smsDelivery.error || "Canale SMS non configurato");
   }
 
   if (channel === "whatsapp") {
-    const whatsappDelivery = await resolveWhatsappDeliveryConfigForAppointment(appointment);
+    const whatsappDelivery = await resolveWhatsappDeliveryConfigForAppointment(
+      appointment,
+      deliveryContext
+    );
     if (whatsappDelivery.kind === "meta_cloud") {
       return sendMetaWhatsappMessage({
         accessToken: whatsappDelivery.accessToken,
@@ -1607,6 +1836,68 @@ async function sendNotificationChannel(channel, appointment, subject, message) {
   }
 
   throw new Error("Canale reminder non supportato");
+}
+
+async function resolveBranchMessagingContextForAppointment(appointment) {
+  const assignedUser = await findUserById(appointment.assignedUserId);
+  if (!assignedUser) {
+    return {
+      assignedUser: null,
+      branchOwner: null,
+      rawConfig: getDefaultAdminChannelConfig(null, null),
+      branchConfig: sanitizeAdminChannelConfig(getDefaultAdminChannelConfig(null, null), null, null),
+      error: "Utente assegnato non trovato"
+    };
+  }
+
+  const effectiveAdminId = getEffectiveAdminId(assignedUser);
+  const branchOwner = effectiveAdminId ? await findUserById(effectiveAdminId) : null;
+  const rawConfig = effectiveAdminId
+    ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
+    : getDefaultAdminChannelConfig(null, null);
+  const branchConfig = sanitizeAdminChannelConfig(rawConfig, null, branchOwner);
+
+  return {
+    assignedUser,
+    branchOwner,
+    rawConfig,
+    branchConfig
+  };
+}
+
+async function resolveSmsDeliveryConfigForAppointment(appointment, deliveryContext) {
+  const context = deliveryContext || (await resolveBranchMessagingContextForAppointment(appointment));
+  const branchConfig = context.branchConfig || getDefaultAdminChannelConfig(null, null);
+  const twilioReady = Boolean(
+    CONFIG.twilio.accountSid &&
+      CONFIG.twilio.authToken &&
+      (CONFIG.twilio.smsFrom || branchConfig.smsSenderId)
+  );
+
+  if (twilioReady) {
+    const preferredSender =
+      supportsAlphanumericSmsSender(appointment.clientPhone) && branchConfig.smsSenderId
+        ? branchConfig.smsSenderId
+        : CONFIG.twilio.smsFrom;
+
+    if (preferredSender) {
+      return {
+        kind: "twilio",
+        from: preferredSender
+      };
+    }
+  }
+
+  if (CONFIG.allowMockDelivery) {
+    return {
+      kind: "mock"
+    };
+  }
+
+  return {
+    kind: "error",
+    error: "Canale SMS non configurato"
+  };
 }
 
 async function sendMockNotification(channel, destination, message) {
@@ -1682,8 +1973,9 @@ async function sendTwilioMessage({ to, from, body }) {
   };
 }
 
-async function resolveWhatsappDeliveryConfigForAppointment(appointment) {
-  const assignedUser = await findUserById(appointment.assignedUserId);
+async function resolveWhatsappDeliveryConfigForAppointment(appointment, deliveryContext) {
+  const context = deliveryContext || (await resolveBranchMessagingContextForAppointment(appointment));
+  const assignedUser = context.assignedUser;
   if (!assignedUser) {
     return {
       kind: "error",
@@ -1691,10 +1983,7 @@ async function resolveWhatsappDeliveryConfigForAppointment(appointment) {
     };
   }
 
-  const effectiveAdminId = getEffectiveAdminId(assignedUser);
-  const branchConfig = effectiveAdminId
-    ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
-    : getDefaultAdminChannelConfig(null);
+  const branchConfig = context.rawConfig || getDefaultAdminChannelConfig(null, null);
 
   if (branchConfig.whatsappMode === "meta_cloud") {
     if (!hasMetaWhatsappConfiguration(branchConfig)) {
@@ -2151,12 +2440,19 @@ function userToRow(user) {
 function adminChannelConfigFromRow(row) {
   return {
     brandOwnerUserId: row.brand_owner_user_id,
+    businessDisplayName: row.business_display_name || "",
+    smsSenderId: row.sms_sender_id || "",
     whatsappMode: normalizeWhatsappProviderMode(row.whatsapp_mode),
     metaAccessTokenEncrypted: row.meta_access_token_encrypted || null,
     metaPhoneNumberId: row.meta_phone_number_id || null,
     metaWabaId: row.meta_waba_id || null,
     metaBusinessAccountId: row.meta_business_account_id || null,
     metaDisplayPhoneNumber: row.meta_display_phone_number || null,
+    billingModel: normalizeBillingModel(row.billing_model),
+    walletBalance: normalizeMoney(row.wallet_balance || 0, 0),
+    walletCurrency: row.wallet_currency || DEFAULT_WALLET_CURRENCY,
+    smsUnitPrice: normalizeUnitPrice(row.sms_unit_price, DEFAULT_SMS_UNIT_PRICE),
+    whatsappUnitPrice: normalizeUnitPrice(row.whatsapp_unit_price, DEFAULT_WHATSAPP_UNIT_PRICE),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -2165,12 +2461,22 @@ function adminChannelConfigFromRow(row) {
 function adminChannelConfigToRow(config) {
   return {
     brand_owner_user_id: config.brandOwnerUserId,
+    business_display_name: nullableString(config.businessDisplayName),
+    sms_sender_id: nullableString(config.smsSenderId),
     whatsapp_mode: normalizeWhatsappProviderMode(config.whatsappMode),
     meta_access_token_encrypted: config.metaAccessTokenEncrypted || null,
     meta_phone_number_id: config.metaPhoneNumberId || null,
     meta_waba_id: config.metaWabaId || null,
     meta_business_account_id: config.metaBusinessAccountId || null,
     meta_display_phone_number: config.metaDisplayPhoneNumber || null,
+    billing_model: normalizeBillingModel(config.billingModel),
+    wallet_balance: normalizeMoney(config.walletBalance || 0, 0),
+    wallet_currency: config.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    sms_unit_price: normalizeUnitPrice(config.smsUnitPrice, DEFAULT_SMS_UNIT_PRICE),
+    whatsapp_unit_price: normalizeUnitPrice(
+      config.whatsappUnitPrice,
+      DEFAULT_WHATSAPP_UNIT_PRICE
+    ),
     created_at: config.createdAt,
     updated_at: config.updatedAt
   };

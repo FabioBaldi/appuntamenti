@@ -467,6 +467,21 @@ textarea {
   line-height: 1.55;
 }
 
+.info-list {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: var(--radius-sm);
+  background: rgba(15, 143, 116, 0.08);
+  border: 1px solid rgba(15, 143, 116, 0.12);
+}
+
+.info-list p {
+  margin: 0;
+  color: var(--ink-main);
+  line-height: 1.5;
+}
+
 .channel-provider {
   display: flex;
   align-items: center;

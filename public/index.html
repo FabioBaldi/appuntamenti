@@ -368,13 +368,13 @@
               <section class="panel">
                 <div class="section-heading">
                   <span class="eyebrow">Setup rapido</span>
-                  <h3>Provider esterni</h3>
+                  <h3>Modello consigliato</h3>
                 </div>
                 <div class="steps">
-                  <p>1. Copia <code>.env.example</code> in <code>.env</code>.</p>
-                  <p>2. Inserisci credenziali Resend per email e Twilio per SMS.</p>
-                  <p>3. Per WhatsApp puoi tenere il provider attuale oppure usare Meta Cloud del cliente per ogni ramo admin.</p>
-                  <p>4. Riavvia il server per attivare gli invii reali.</p>
+                  <p>1. Standard: SMS del ramo e WhatsApp dal numero condiviso della piattaforma.</p>
+                  <p>2. Premium: solo se serve, il cliente puo usare il suo numero WhatsApp dedicato.</p>
+                  <p>3. Inserisci in <code>.env</code> Resend e Twilio per attivare gli invii reali.</p>
+                  <p>4. Riavvia il server dopo ogni cambio credenziali.</p>
                   <p>
                     Se i provider non sono configurati, il sistema resta testabile in modalita mock e
                     simula gli invii senza dipendere da servizi esterni.
@@ -382,31 +382,61 @@
                 </div>
               </section>
 
-              <section id="whatsappBranchPanel" class="panel">
+              <section id="branchMessagingPanel" class="panel hidden">
                 <div class="section-heading">
-                  <span class="eyebrow">WhatsApp per ramo</span>
-                  <h3>Billing del cliente</h3>
+                  <span class="eyebrow">Profilo ramo</span>
+                  <h3>Messaggi standard e premium</h3>
                 </div>
 
-                <form id="whatsappBranchForm" class="stack-form">
+                <form id="branchMessagingForm" class="stack-form">
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Nome attivita per i remind</span>
+                      <input
+                        id="branchBusinessDisplayName"
+                        type="text"
+                        maxlength="80"
+                        placeholder="Es. Studio Rossi"
+                      />
+                    </label>
+                    <label>
+                      <span>Mittente SMS del ramo</span>
+                      <input
+                        id="branchSmsSenderId"
+                        type="text"
+                        maxlength="11"
+                        placeholder="Es. STUDIOROSSI"
+                      />
+                    </label>
+                  </div>
+
+                  <div class="info-list">
+                    <p>SMS standard: quando il paese lo supporta il cliente vede il nome del tuo ramo.</p>
+                    <p>WhatsApp standard: il messaggio parte dal numero condiviso della piattaforma.</p>
+                  </div>
+
                   <label>
-                    <span>Modalita provider</span>
-                    <select id="whatsappProviderMode">
-                      <option value="system">Provider attuale della piattaforma</option>
-                      <option value="meta_cloud">Meta Cloud API del cliente</option>
+                    <span>Numero WhatsApp standard della piattaforma</span>
+                    <input id="branchSharedWhatsappFrom" type="text" readonly />
+                  </label>
+
+                  <label>
+                    <span>Modalita WhatsApp</span>
+                    <select id="branchWhatsappMode">
+                      <option value="system">Standard: numero condiviso piattaforma</option>
+                      <option value="meta_cloud">Premium: numero dedicato del cliente</option>
                     </select>
                   </label>
 
-                  <p id="whatsappBranchModeHint" class="muted">
-                    Il ramo puo continuare a usare la configurazione WhatsApp attuale oppure passare a
-                    un account Meta del cliente.
+                  <p id="branchMessagingHint" class="muted">
+                    Il ramo usa il profilo standard per avere un setup rapido di SMS e WhatsApp.
                   </p>
 
-                  <div id="whatsappMetaSettings" class="stack-form hidden">
+                  <div id="branchPremiumFields" class="stack-form hidden">
                     <label>
                       <span>Meta access token permanente</span>
                       <input
-                        id="whatsappMetaAccessToken"
+                        id="branchMetaAccessToken"
                         type="password"
                         autocomplete="off"
                         placeholder="Inserisci un nuovo token solo se vuoi salvarlo o sostituirlo"
@@ -416,37 +446,37 @@
                     <div class="field-grid two-columns">
                       <label>
                         <span>Phone Number ID</span>
-                        <input id="whatsappMetaPhoneNumberId" type="text" />
+                        <input id="branchMetaPhoneNumberId" type="text" />
                       </label>
                       <label>
                         <span>Numero WhatsApp visibile</span>
-                        <input id="whatsappMetaDisplayPhoneNumber" type="text" placeholder="+39..." />
+                        <input id="branchMetaDisplayPhoneNumber" type="text" placeholder="+39..." />
                       </label>
                     </div>
 
                     <div class="field-grid two-columns">
                       <label>
                         <span>WABA ID</span>
-                        <input id="whatsappMetaWabaId" type="text" />
+                        <input id="branchMetaWabaId" type="text" />
                       </label>
                       <label>
                         <span>Meta Business Account ID</span>
-                        <input id="whatsappMetaBusinessAccountId" type="text" />
+                        <input id="branchMetaBusinessAccountId" type="text" />
                       </label>
                     </div>
 
                     <p class="muted">
-                      Con questa modalita il costo dei messaggi WhatsApp resta sul metodo di pagamento
-                      configurato dal cliente nel suo account Meta.
+                      Attiva questa modalita solo se il cliente vuole usare il proprio numero WhatsApp
+                      dedicato con configurazione Meta Cloud.
                     </p>
                   </div>
 
                   <div class="form-actions">
-                    <button id="whatsappBranchSaveButton" class="primary-button" type="submit">
-                      Salva configurazione WhatsApp
+                    <button id="branchMessagingSaveButton" class="primary-button" type="submit">
+                      Salva profilo messaggi
                     </button>
                   </div>
-                  <p id="whatsappBranchFeedback" class="feedback"></p>
+                  <p id="branchMessagingFeedback" class="feedback"></p>
                 </form>
               </section>
             </div>

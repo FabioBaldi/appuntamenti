@@ -48,15 +48,43 @@ on public.app_users (created_by_user_id);
 
 create table if not exists public.admin_channel_configs (
   brand_owner_user_id uuid primary key references public.app_users(id) on delete cascade,
+  business_display_name text,
+  sms_sender_id text,
   whatsapp_mode text not null default 'system' check (whatsapp_mode in ('system', 'meta_cloud')),
   meta_access_token_encrypted text,
   meta_phone_number_id text,
   meta_waba_id text,
   meta_business_account_id text,
   meta_display_phone_number text,
+  billing_model text not null default 'platform' check (billing_model in ('platform', 'wallet')),
+  wallet_balance numeric(12,2) not null default 0,
+  wallet_currency text not null default 'EUR',
+  sms_unit_price numeric(12,2) not null default 0.08,
+  whatsapp_unit_price numeric(12,2) not null default 0.12,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.admin_channel_configs
+  add column if not exists business_display_name text;
+
+alter table public.admin_channel_configs
+  add column if not exists sms_sender_id text;
+
+alter table public.admin_channel_configs
+  add column if not exists billing_model text not null default 'platform';
+
+alter table public.admin_channel_configs
+  add column if not exists wallet_balance numeric(12,2) not null default 0;
+
+alter table public.admin_channel_configs
+  add column if not exists wallet_currency text not null default 'EUR';
+
+alter table public.admin_channel_configs
+  add column if not exists sms_unit_price numeric(12,2) not null default 0.08;
+
+alter table public.admin_channel_configs
+  add column if not exists whatsapp_unit_price numeric(12,2) not null default 0.12;
 
 create table if not exists public.appointments (
   id uuid primary key default gen_random_uuid(),
