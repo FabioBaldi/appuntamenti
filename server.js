@@ -399,7 +399,7 @@ function getEffectiveAdminId(user) {
 }
 
 function canManageBranchDeliveryConfig(user) {
-  return Boolean(user && user.role === "admin" && getEffectiveAdminId(user) === user.id);
+  return Boolean(user && user.role === "admin" && getEffectiveAdminId(user));
 }
 
 function normalizeWhatsappProviderMode(value) {
@@ -604,15 +604,21 @@ async function handleApiRequest(req, res, url) {
 
     if (!canManageBranchDeliveryConfig(user)) {
       return sendJson(res, 403, {
-        error: "Solo l'admin proprietario del ramo puo configurare il profilo messaggi del proprio account"
+        error: "Solo gli admin possono configurare il profilo messaggi del proprio ramo"
       });
     }
 
     const body = await readJsonBody(req);
-    const existingConfig = await findAdminChannelConfigByBrandOwnerId(user.id);
-    const nextConfig = buildBranchMessagingConfigPayload(body, user, existingConfig);
 
     try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(user, null);
+      const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+      const nextConfig = buildBranchMessagingConfigPayload(
+        body,
+        user,
+        existingConfig,
+        targetBranchOwner
+      );
       if (nextConfig.whatsappMode === "meta_cloud") {
         await validateMetaWhatsappConfig(nextConfig);
       }
@@ -621,7 +627,7 @@ async function handleApiRequest(req, res, url) {
       const users = await listUsers({ includeSecrets: false });
       const userMap = buildRawUserMap(users);
       return sendJson(res, 200, {
-        config: sanitizeAdminChannelConfig(savedConfig, userMap, user),
+        config: sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
         delivery: await getDeliveryStatusForUser(user)
       });
     } catch (error) {
@@ -1491,13 +1497,15 @@ function hasMetaWhatsappConfiguration(config) {
 }
 
 function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
-  const previous = existingConfig || getDefaultAdminChannelConfig(actor.id, actor);
+  const targetBranchOwner = arguments.length > 3 && arguments[3] ? arguments[3] : actor;
+  const previous =
+    existingConfig || getDefaultAdminChannelConfig(targetBranchOwner.id, targetBranchOwner);
   const now = new Date().toISOString();
   const mode = normalizeWhatsappProviderMode(body.mode || previous.whatsappMode);
   const requestedBusinessName = String(body.businessDisplayName ?? previous.businessDisplayName ?? "")
     .trim()
     .slice(0, 80);
-  const businessDisplayName = requestedBusinessName || actor.fullName;
+  const businessDisplayName = requestedBusinessName || targetBranchOwner.fullName;
   const requestedSmsSender = String(body.smsSenderId ?? previous.smsSenderId ?? "").trim();
   const smsSenderId = deriveSmsSenderId(requestedSmsSender || businessDisplayName);
   if (!businessDisplayName) {
@@ -1505,7 +1513,7 @@ function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
   }
 
   const nextConfig = {
-    brandOwnerUserId: actor.id,
+    brandOwnerUserId: targetBranchOwner.id,
     businessDisplayName,
     smsSenderId,
     whatsappMode: mode,
@@ -1555,10 +1563,15 @@ function buildBranchBillingConfigPayload(body, targetBranchOwner, existingConfig
 async function resolveBranchOwnerForSettingsRequest(actor, targetAdminId) {
   const resolvedTargetId = String(targetAdminId || "").trim();
   if (!resolvedTargetId) {
-    if (!canManageBranchDeliveryConfig(actor)) {
+    const effectiveAdminId = actor ? getEffectiveAdminId(actor) : null;
+    if (!canManageBranchDeliveryConfig(actor) || !effectiveAdminId) {
       throw new Error("Seleziona un account admin proprietario di ramo da gestire.");
     }
-    return actor;
+    const branchOwner = await findUserById(effectiveAdminId);
+    if (!branchOwner || branchOwner.role !== "admin") {
+      throw new Error("Admin proprietario del ramo non trovato.");
+    }
+    return branchOwner;
   }
 
   const targetUser = await findUserById(resolvedTargetId);
