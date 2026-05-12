@@ -3,7 +3,8 @@ const state = {
   appointments: [],
   users: [],
   delivery: null,
-  activeTab: "dashboard"
+  activeTab: "dashboard",
+  selectedBranchMessagingAdminId: null
 };
 
 const elements = {};
@@ -75,6 +76,8 @@ function cacheElements() {
     "deliveryChannels",
     "branchMessagingPanel",
     "branchMessagingForm",
+    "branchMessagingTargetField",
+    "branchMessagingTargetAdminId",
     "branchBusinessDisplayName",
     "branchSmsSenderId",
     "branchSharedWhatsappFrom",
@@ -117,6 +120,7 @@ function bindEvents() {
   elements.reminderEnabled.addEventListener("change", updateReminderFieldsState);
   elements.branchMessagingForm.addEventListener("submit", handleBranchMessagingSubmit);
   elements.branchWhatsappMode.addEventListener("change", updateBranchMessagingModeFields);
+  elements.branchMessagingTargetAdminId.addEventListener("change", handleBranchMessagingTargetChange);
   elements.brandingForm.addEventListener("submit", handleBrandingSubmit);
   elements.removeBrandingButton.addEventListener("click", handleBrandingRemove);
   elements.brandingTargetAdminId.addEventListener("change", renderBrandingManager);
@@ -188,6 +192,7 @@ async function handleLogout() {
   state.appointments = [];
   state.users = [];
   state.delivery = null;
+  state.selectedBranchMessagingAdminId = null;
   showLogin();
 }
 
@@ -627,11 +632,14 @@ function renderBranchMessagingSettings() {
   const branchConfig =
     state.delivery && (state.delivery.branchMessagingConfig || state.delivery.whatsappBranchConfig);
   const canShowPanel = Boolean(state.currentUser && state.currentUser.role === "admin");
+  const isPlatformOwner = Boolean(state.currentUser && state.currentUser.isPlatformOwner);
   elements.branchMessagingPanel.classList.toggle("hidden", !canShowPanel);
 
   if (!canShowPanel || !branchConfig) {
     return;
   }
+
+  renderBranchMessagingTargetSelector(branchConfig, isPlatformOwner);
 
   elements.branchBusinessDisplayName.value = branchConfig.businessDisplayName || "";
   elements.branchSmsSenderId.value = branchConfig.smsSenderId || "";
@@ -653,8 +661,12 @@ function renderBranchMessagingSettings() {
   if (branchConfig.canManageMessaging) {
     elements.branchMessagingHint.textContent =
       branchConfig.whatsappMode === "meta_cloud"
-        ? "Modalita premium attiva: il ramo usa il proprio numero WhatsApp. Puoi tornare alla modalita standard condivisa in qualsiasi momento."
-        : "Modalita standard attiva: SMS con mittente del ramo dove supportato e WhatsApp dal numero condiviso della piattaforma.";
+        ? branchConfig.canManagePremium
+          ? "Modalita premium attiva: il ramo usa il proprio numero WhatsApp. Solo l'admin principale puo cambiarla o tornare allo standard."
+          : "Modalita premium attiva per questo ramo. Solo l'admin principale puo cambiarla o modificarne i dati dedicati."
+        : branchConfig.canManagePremium
+          ? "Modalita standard attiva: SMS con mittente del ramo dove supportato e WhatsApp dal numero condiviso della piattaforma."
+          : "Modalita standard attiva: puoi personalizzare nome attivita e mittente SMS. La modalita premium viene abilitata solo dall'admin principale.";
   } else {
     elements.branchMessagingHint.textContent =
       branchConfig.whatsappMode === "meta_cloud"
@@ -665,12 +677,53 @@ function renderBranchMessagingSettings() {
   elements.branchMessagingForm
     .querySelectorAll("input, select, button")
     .forEach((field) => {
-      const shouldDisable =
-        !branchConfig.canManageMessaging || field.id === "branchSharedWhatsappFrom";
+      const isPremiumField = [
+        "branchWhatsappMode",
+        "branchMetaAccessToken",
+        "branchMetaPhoneNumberId",
+        "branchMetaDisplayPhoneNumber",
+        "branchMetaWabaId",
+        "branchMetaBusinessAccountId"
+      ].includes(field.id);
+      let shouldDisable = !branchConfig.canManageMessaging || field.id === "branchSharedWhatsappFrom";
+      if (isPremiumField && !branchConfig.canManagePremium) {
+        shouldDisable = true;
+      }
       field.disabled = shouldDisable;
     });
 
   updateBranchMessagingModeFields();
+}
+
+function renderBranchMessagingTargetSelector(branchConfig, isPlatformOwner) {
+  elements.branchMessagingTargetField.classList.toggle("hidden", !isPlatformOwner);
+  if (!isPlatformOwner) {
+    return;
+  }
+
+  const adminTargets = state.users.filter((user) => user.role === "admin" && user.isBrandOwner);
+  const fallbackTargetId =
+    state.selectedBranchMessagingAdminId ||
+    branchConfig.branchOwnerId ||
+    state.currentUser.effectiveAdminId ||
+    state.currentUser.id;
+
+  elements.branchMessagingTargetAdminId.innerHTML = adminTargets
+    .map((user) => {
+      const suffix = user.isPlatformOwner ? " (ramo principale)" : "";
+      return `<option value="${user.id}">${escapeHtml(user.fullName)}${suffix}</option>`;
+    })
+    .join("");
+
+  if (adminTargets.some((user) => user.id === fallbackTargetId)) {
+    elements.branchMessagingTargetAdminId.value = fallbackTargetId;
+    state.selectedBranchMessagingAdminId = fallbackTargetId;
+  } else if (adminTargets.length) {
+    elements.branchMessagingTargetAdminId.value = adminTargets[0].id;
+    state.selectedBranchMessagingAdminId = adminTargets[0].id;
+  } else {
+    state.selectedBranchMessagingAdminId = null;
+  }
 }
 
 function updateBranchMessagingModeFields() {
@@ -688,6 +741,26 @@ function updateBranchMessagingModeFields() {
     elements.branchMessagingSaveButton.textContent = "Salva profilo premium";
   } else {
     elements.branchMessagingSaveButton.textContent = "Salva profilo standard";
+  }
+}
+
+async function handleBranchMessagingTargetChange() {
+  state.selectedBranchMessagingAdminId = elements.branchMessagingTargetAdminId.value || null;
+  setFeedback(elements.branchMessagingFeedback, "");
+
+  if (!state.selectedBranchMessagingAdminId) {
+    return;
+  }
+
+  try {
+    const response = await api(
+      `/api/settings/branch-config?targetAdminId=${encodeURIComponent(state.selectedBranchMessagingAdminId)}`
+    );
+    state.delivery.branchMessagingConfig = response.config;
+    state.delivery.whatsappBranchConfig = response.config;
+    renderBranchMessagingSettings();
+  } catch (error) {
+    setFeedback(elements.branchMessagingFeedback, error.message, true);
   }
 }
 
@@ -850,6 +923,7 @@ async function handleBranchMessagingSubmit(event) {
       method: "PUT",
       body: {
         mode,
+        targetAdminId: state.currentUser.isPlatformOwner ? state.selectedBranchMessagingAdminId : null,
         businessDisplayName: elements.branchBusinessDisplayName.value,
         smsSenderId: elements.branchSmsSenderId.value,
         metaAccessToken: elements.branchMetaAccessToken.value,
@@ -861,6 +935,8 @@ async function handleBranchMessagingSubmit(event) {
     });
 
     state.delivery = response.delivery;
+    state.delivery.branchMessagingConfig = response.config;
+    state.delivery.whatsappBranchConfig = response.config;
     renderDelivery();
     renderBranchMessagingSettings();
     setFeedback(

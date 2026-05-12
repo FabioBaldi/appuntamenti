@@ -585,7 +585,13 @@ async function handleApiRequest(req, res, url) {
       const userMap = buildRawUserMap(users);
       const config = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
       return sendJson(res, 200, {
-        config: sanitizeAdminChannelConfig(config, userMap, targetBranchOwner),
+        config: {
+          ...sanitizeAdminChannelConfig(config, userMap, targetBranchOwner),
+          canManageMessaging: canManageBranchDeliveryConfig(user),
+          canManagePremium: Boolean(user && user.isPlatformOwner),
+          branchOwnerId: targetBranchOwner.id,
+          branchOwnerName: targetBranchOwner.fullName
+        },
         targetAdmin: sanitizeUser(targetBranchOwner, userMap)
       });
     } catch (error) {
@@ -611,7 +617,10 @@ async function handleApiRequest(req, res, url) {
     const body = await readJsonBody(req);
 
     try {
-      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(user, null);
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+        user,
+        String(body.targetAdminId || "").trim() || null
+      );
       const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
       const nextConfig = buildBranchMessagingConfigPayload(
         body,
@@ -627,7 +636,13 @@ async function handleApiRequest(req, res, url) {
       const users = await listUsers({ includeSecrets: false });
       const userMap = buildRawUserMap(users);
       return sendJson(res, 200, {
-        config: sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
+        config: {
+          ...sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
+          canManageMessaging: canManageBranchDeliveryConfig(user),
+          canManagePremium: Boolean(user && user.isPlatformOwner),
+          branchOwnerId: targetBranchOwner.id,
+          branchOwnerName: targetBranchOwner.fullName
+        },
         delivery: await getDeliveryStatusForUser(user)
       });
     } catch (error) {
@@ -1404,6 +1419,7 @@ async function getDeliveryStatusForUser(user) {
     branchMessagingConfig: {
       ...branchConfig,
       canManageMessaging: canManageBranchDeliveryConfig(user),
+      canManagePremium: Boolean(user && user.isPlatformOwner),
       canManageBilling: Boolean(user && user.isPlatformOwner),
       branchOwnerId: effectiveAdminId,
       branchOwnerName: branchOwner ? branchOwner.fullName : null,
@@ -1501,7 +1517,9 @@ function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
   const previous =
     existingConfig || getDefaultAdminChannelConfig(targetBranchOwner.id, targetBranchOwner);
   const now = new Date().toISOString();
-  const mode = normalizeWhatsappProviderMode(body.mode || previous.whatsappMode);
+  const mode = actor.isPlatformOwner
+    ? normalizeWhatsappProviderMode(body.mode || previous.whatsappMode)
+    : normalizeWhatsappProviderMode(previous.whatsappMode);
   const requestedBusinessName = String(body.businessDisplayName ?? previous.businessDisplayName ?? "")
     .trim()
     .slice(0, 80);
@@ -1518,12 +1536,18 @@ function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
     smsSenderId,
     whatsappMode: mode,
     metaAccessTokenEncrypted: previous.metaAccessTokenEncrypted || null,
-    metaPhoneNumberId: String(body.metaPhoneNumberId ?? previous.metaPhoneNumberId ?? "").trim() || null,
-    metaWabaId: String(body.metaWabaId ?? previous.metaWabaId ?? "").trim() || null,
-    metaBusinessAccountId:
-      String(body.metaBusinessAccountId ?? previous.metaBusinessAccountId ?? "").trim() || null,
-    metaDisplayPhoneNumber:
-      String(body.metaDisplayPhoneNumber ?? previous.metaDisplayPhoneNumber ?? "").trim() || null,
+    metaPhoneNumberId: actor.isPlatformOwner
+      ? String(body.metaPhoneNumberId ?? previous.metaPhoneNumberId ?? "").trim() || null
+      : previous.metaPhoneNumberId || null,
+    metaWabaId: actor.isPlatformOwner
+      ? String(body.metaWabaId ?? previous.metaWabaId ?? "").trim() || null
+      : previous.metaWabaId || null,
+    metaBusinessAccountId: actor.isPlatformOwner
+      ? String(body.metaBusinessAccountId ?? previous.metaBusinessAccountId ?? "").trim() || null
+      : previous.metaBusinessAccountId || null,
+    metaDisplayPhoneNumber: actor.isPlatformOwner
+      ? String(body.metaDisplayPhoneNumber ?? previous.metaDisplayPhoneNumber ?? "").trim() || null
+      : previous.metaDisplayPhoneNumber || null,
     billingModel: normalizeBillingModel(previous.billingModel),
     walletBalance: normalizeMoney(previous.walletBalance || 0, 0),
     walletCurrency: previous.walletCurrency || DEFAULT_WALLET_CURRENCY,
@@ -1534,7 +1558,7 @@ function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
   };
 
   const nextToken = String(body.metaAccessToken || "").trim();
-  if (nextToken) {
+  if (actor.isPlatformOwner && nextToken) {
     nextConfig.metaAccessTokenEncrypted = encryptSensitiveValue(nextToken);
   }
 
@@ -1579,7 +1603,7 @@ async function resolveBranchOwnerForSettingsRequest(actor, targetAdminId) {
     throw new Error("Seleziona un admin proprietario di ramo valido.");
   }
 
-  if (!actor.isPlatformOwner && actor.id !== targetUser.id) {
+  if (!actor.isPlatformOwner && getEffectiveAdminId(actor) !== targetUser.id) {
     throw new Error("Non puoi gestire il profilo messaggi di un altro ramo.");
   }
 
