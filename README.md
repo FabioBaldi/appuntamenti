@@ -10,6 +10,7 @@ Piattaforma web standalone per la gestione completa degli appuntamenti con:
 - persistenza dati su `Supabase`
 - reminder automatici o manuali via `email`, `SMS` o `WhatsApp`
 - possibilita per ogni ramo `admin` di usare il WhatsApp del cliente con billing diretto su Meta, mantenendo il fallback al provider attuale
+- wallet per ramo con ricarica via `Stripe Checkout` e storico movimenti
 
 ## Avvio rapido
 
@@ -44,11 +45,13 @@ Il backend usa le API REST di Supabase lato server. Nessun utente o appuntamento
 Tabelle utilizzate:
 
 - `public.app_users`
+- `public.admin_channel_configs`
 - `public.appointments`
+- `public.wallet_transactions`
 
 Il cookie di login e firmato dal server, mentre utenti e appuntamenti risiedono in Supabase.
 
-Se stai aggiornando una versione gia avviata del progetto, riesegui [supabase/schema.sql](./supabase/schema.sql) per aggiungere i campi `is_platform_owner`, `created_by_user_id`, `owner_admin_id`, `logo_data_url` e la tabella `admin_channel_configs`.
+Se stai aggiornando una versione gia avviata del progetto, riesegui [supabase/schema.sql](./supabase/schema.sql) oppure applica le migration in `supabase/migrations`, cosi aggiungi anche wallet, movimenti e funzioni RPC necessarie.
 
 ## Reminder multicanale
 
@@ -94,6 +97,40 @@ META_GRAPH_VERSION=v23.0
 ```
 
 Se `APP_CREDENTIALS_SECRET` non e impostata, il server usa `SESSION_SECRET` per cifrare i token salvati.
+
+### Wallet e Stripe
+
+Il ramo puo essere configurato in due modi:
+
+- `platform`: il costo di SMS e WhatsApp resta a carico della piattaforma
+- `wallet`: ogni invio reale scala il saldo del ramo
+
+Il wallet usa `Stripe Checkout` per le ricariche e un webhook firmato per accreditare il credito solo a pagamento confermato.
+
+Variabili da impostare:
+
+```env
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_WALLET_CURRENCY=EUR
+STRIPE_WALLET_MIN_TOPUP=10
+STRIPE_WALLET_MAX_TOPUP=1000
+STRIPE_WALLET_TOPUP_OPTIONS=25,50,100
+```
+
+Webhook da registrare su Stripe:
+
+- `POST /api/stripe/webhook`
+
+Evento richiesto:
+
+- `checkout.session.completed`
+
+Comportamento attuale:
+
+- gli admin di ramo possono ricaricare il proprio wallet
+- solo l'admin principale puo decidere se un ramo usa `platform` o `wallet`
+- solo gli invii reali consumano credito; la modalita `mock` non scala il saldo
 
 ### Modalita mock
 

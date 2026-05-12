@@ -484,6 +484,70 @@
                   <p id="branchMessagingFeedback" class="feedback"></p>
                 </form>
               </section>
+
+              <section id="branchBillingPanel" class="panel hidden">
+                <div class="section-heading">
+                  <span class="eyebrow">Credito ramo</span>
+                  <h3>Wallet e costi reminder</h3>
+                </div>
+
+                <form id="branchBillingForm" class="stack-form">
+                  <div class="wallet-balance-card">
+                    <span>Saldo disponibile</span>
+                    <strong id="branchWalletBalanceValue">0,00 €</strong>
+                    <p id="branchWalletBalanceHint" class="muted">
+                      Il saldo viene usato solo se il ramo e in modalita wallet.
+                    </p>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Modello di addebito</span>
+                      <select id="branchWalletBillingMode">
+                        <option value="platform">Piattaforma assorbe il costo</option>
+                        <option value="wallet">Scala dal wallet del ramo</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Importo libero ricarica</span>
+                      <input id="branchWalletTopupAmount" type="number" min="1" step="1" placeholder="Es. 50" />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns">
+                    <label>
+                      <span>Costo unitario SMS</span>
+                      <input id="branchWalletSmsUnitPrice" type="number" min="0" step="0.01" />
+                    </label>
+                    <label>
+                      <span>Costo unitario WhatsApp</span>
+                      <input id="branchWalletWhatsappUnitPrice" type="number" min="0" step="0.01" />
+                    </label>
+                  </div>
+
+                  <div class="wallet-topup-grid">
+                    <button class="inline-button wallet-topup-button" data-amount="25" type="button">Ricarica 25€</button>
+                    <button class="inline-button wallet-topup-button" data-amount="50" type="button">Ricarica 50€</button>
+                    <button class="inline-button wallet-topup-button" data-amount="100" type="button">Ricarica 100€</button>
+                    <button id="branchWalletCheckoutButton" class="primary-button" type="button">Ricarica con Stripe</button>
+                  </div>
+
+                  <div class="form-actions">
+                    <button id="branchBillingSaveButton" class="secondary-button" type="submit">
+                      Salva regole wallet
+                    </button>
+                  </div>
+                  <p id="branchBillingFeedback" class="feedback"></p>
+                </form>
+
+                <div class="wallet-transactions-block">
+                  <div class="section-heading">
+                    <span class="eyebrow">Movimenti</span>
+                    <h3>Storico wallet</h3>
+                  </div>
+                  <div id="branchWalletTransactions" class="compact-list"></div>
+                </div>
+              </section>
             </div>
           </section>
         </section>

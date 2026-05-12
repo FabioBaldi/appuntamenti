@@ -482,6 +482,60 @@ textarea {
   line-height: 1.5;
 }
 
+.wallet-balance-card {
+  display: grid;
+  gap: 10px;
+  padding: 20px;
+  border-radius: 22px;
+  background: linear-gradient(135deg, rgba(15, 143, 116, 0.12) 0%, rgba(255, 255, 255, 0.95) 100%);
+  border: 1px solid rgba(15, 143, 116, 0.14);
+}
+
+.wallet-balance-card span {
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.86rem;
+}
+
+.wallet-balance-card strong {
+  font-size: 2rem;
+  color: var(--ink-main);
+}
+
+.wallet-topup-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.wallet-transactions-block {
+  margin-top: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.wallet-transaction-card {
+  gap: 8px;
+}
+
+.wallet-transaction-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wallet-amount-positive {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.wallet-amount-negative {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .channel-provider {
   display: flex;
   align-items: center;

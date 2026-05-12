@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
+const Stripe = require("stripe");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
@@ -28,6 +29,7 @@ const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const DEFAULT_WALLET_CURRENCY = "EUR";
 const DEFAULT_SMS_UNIT_PRICE = 0.08;
 const DEFAULT_WHATSAPP_UNIT_PRICE = 0.12;
+const DEFAULT_WALLET_TOP_UP_OPTIONS = [25, 50, 100];
 
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
@@ -44,6 +46,7 @@ const CONFIG = {
   usersTable: "app_users",
   appointmentsTable: "appointments",
   adminChannelConfigsTable: "admin_channel_configs",
+  walletTransactionsTable: "wallet_transactions",
   allowMockDelivery: parseBoolean(process.env.ALLOW_MOCK_DELIVERY, true),
   credentialsSecret:
     process.env.APP_CREDENTIALS_SECRET || process.env.SESSION_SECRET || "development-session-secret",
@@ -57,6 +60,14 @@ const CONFIG = {
     smsFrom: process.env.TWILIO_SMS_FROM || "",
     whatsappFrom: process.env.TWILIO_WHATSAPP_FROM || ""
   },
+  stripe: {
+    secretKey: process.env.STRIPE_SECRET_KEY || "",
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "",
+    currency: (process.env.STRIPE_WALLET_CURRENCY || DEFAULT_WALLET_CURRENCY).toLowerCase(),
+    minimumTopUp: Number(process.env.STRIPE_WALLET_MIN_TOPUP || 10),
+    maximumTopUp: Number(process.env.STRIPE_WALLET_MAX_TOPUP || 1000),
+    topUpOptions: parseMoneyOptions(process.env.STRIPE_WALLET_TOPUP_OPTIONS, DEFAULT_WALLET_TOP_UP_OPTIONS)
+  },
   meta: {
     graphVersion: META_GRAPH_VERSION
   }
@@ -69,6 +80,7 @@ const IS_VERCEL = Boolean(process.env.VERCEL);
 let reminderLoopBusy = false;
 let reminderLoopStarted = false;
 let appReadyPromise = null;
+let stripeClient = null;
 
 async function main() {
   await ensureAppReady();
@@ -173,6 +185,20 @@ function parseBoolean(value, fallback = false) {
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
 }
 
+function parseMoneyOptions(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return [...fallback];
+  }
+
+  const options = String(value)
+    .split(",")
+    .map((entry) => Number(entry.trim()))
+    .filter((entry) => Number.isFinite(entry) && entry > 0)
+    .map((entry) => roundCurrency(entry));
+
+  return options.length ? Array.from(new Set(options)).sort((left, right) => left - right) : [...fallback];
+}
+
 function ensureSupabaseConfig() {
   if (!CONFIG.supabaseUrl) {
     throw new Error("Manca SUPABASE_URL nel file .env");
@@ -181,6 +207,22 @@ function ensureSupabaseConfig() {
   if (!CONFIG.supabaseKey) {
     throw new Error("Manca SUPABASE_SECRET_KEY o SUPABASE_SERVICE_ROLE_KEY nel file .env");
   }
+}
+
+function isStripeConfigured() {
+  return Boolean(CONFIG.stripe.secretKey && CONFIG.stripe.webhookSecret);
+}
+
+function getStripeClient() {
+  if (!CONFIG.stripe.secretKey) {
+    throw new Error("Manca STRIPE_SECRET_KEY nel file .env");
+  }
+
+  if (!stripeClient) {
+    stripeClient = new Stripe(CONFIG.stripe.secretKey);
+  }
+
+  return stripeClient;
 }
 
 async function seedInitialAdmin() {
@@ -478,6 +520,20 @@ function canAdminManageUser(actor, target) {
 }
 
 async function readJsonBody(req) {
+  const rawBuffer = await readRawBody(req);
+  if (!rawBuffer.length) {
+    return {};
+  }
+
+  const raw = rawBuffer.toString("utf8");
+  if (!raw.trim()) {
+    return {};
+  }
+
+  return JSON.parse(raw);
+}
+
+async function readRawBody(req) {
   const chunks = [];
   let totalLength = 0;
 
@@ -490,15 +546,17 @@ async function readJsonBody(req) {
   }
 
   if (!chunks.length) {
-    return {};
+    return Buffer.alloc(0);
   }
 
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) {
-    return {};
-  }
+  return Buffer.concat(chunks);
+}
 
-  return JSON.parse(raw);
+function getRequestOrigin(req) {
+  const host = req.headers.host || `localhost:${CONFIG.port}`;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const protocol = forwardedProto || (IS_VERCEL ? "https" : "http");
+  return `${protocol}://${host}`;
 }
 
 async function handleRequest(req, res) {
@@ -520,6 +578,31 @@ async function handleApiRequest(req, res, url) {
       storage: "supabase",
       delivery: await getDeliveryStatusForUser(null)
     });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/stripe/webhook") {
+    try {
+      if (!CONFIG.stripe.webhookSecret) {
+        return sendJson(res, 400, { error: "Webhook Stripe non configurato" });
+      }
+
+      const signature = req.headers["stripe-signature"];
+      if (!signature) {
+        return sendJson(res, 400, { error: "Firma Stripe mancante" });
+      }
+
+      const rawBody = await readRawBody(req);
+      const event = getStripeClient().webhooks.constructEvent(
+        rawBody,
+        signature,
+        CONFIG.stripe.webhookSecret
+      );
+
+      await handleStripeWebhookEvent(event);
+      return sendJson(res, 200, { received: true });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Webhook Stripe non valido" });
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
@@ -592,6 +675,7 @@ async function handleApiRequest(req, res, url) {
           branchOwnerId: targetBranchOwner.id,
           branchOwnerName: targetBranchOwner.fullName
         },
+        billing: await buildBranchBillingPayload(user, targetBranchOwner, config),
         targetAdmin: sanitizeUser(targetBranchOwner, userMap)
       });
     } catch (error) {
@@ -643,6 +727,7 @@ async function handleApiRequest(req, res, url) {
           branchOwnerId: targetBranchOwner.id,
           branchOwnerName: targetBranchOwner.fullName
         },
+        billing: await buildBranchBillingPayload(user, targetBranchOwner, savedConfig),
         delivery: await getDeliveryStatusForUser(user)
       });
     } catch (error) {
@@ -676,7 +761,38 @@ async function handleApiRequest(req, res, url) {
       const userMap = buildRawUserMap(users);
       return sendJson(res, 200, {
         config: sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
+        billing: await buildBranchBillingPayload(user, targetBranchOwner, savedConfig),
         delivery: await getDeliveryStatusForUser(user)
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/billing/checkout-session") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    if (!isStripeConfigured()) {
+      return sendJson(res, 400, {
+        error: "Stripe non configurato. Inserisci STRIPE_SECRET_KEY e STRIPE_WEBHOOK_SECRET."
+      });
+    }
+
+    const body = await readJsonBody(req);
+
+    try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+        user,
+        String(body.targetAdminId || "").trim() || null
+      );
+      const amount = normalizeTopUpAmount(body.amount);
+      const session = await createStripeTopUpSession(req, user, targetBranchOwner, amount);
+      return sendJson(res, 200, {
+        url: session.url,
+        sessionId: session.id
       });
     } catch (error) {
       return sendJson(res, 400, { error: error.message });
@@ -1241,7 +1357,7 @@ function normalizeMoney(value, fallback = 0) {
   if (!Number.isFinite(normalized) || normalized < 0) {
     return fallback;
   }
-  return Math.round(normalized * 100) / 100;
+  return roundCurrency(normalized);
 }
 
 function normalizeUnitPrice(value, fallback) {
@@ -1250,6 +1366,31 @@ function normalizeUnitPrice(value, fallback) {
     return fallback;
   }
   return Math.round(normalized * 10000) / 10000;
+}
+
+function roundCurrency(value) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) {
+    return 0;
+  }
+  return Math.round(normalized * 100) / 100;
+}
+
+function moneyToCents(value) {
+  return Math.round(roundCurrency(value) * 100);
+}
+
+function centsToMoney(value) {
+  return roundCurrency(Number(value || 0) / 100);
+}
+
+function formatMoney(value, currency = DEFAULT_WALLET_CURRENCY) {
+  return new Intl.NumberFormat("it-IT", {
+    style: "currency",
+    currency: String(currency || DEFAULT_WALLET_CURRENCY).toUpperCase(),
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(roundCurrency(value));
 }
 
 function deriveSmsSenderId(value) {
@@ -1388,6 +1529,7 @@ async function getDeliveryStatusForUser(user) {
       (CONFIG.twilio.smsFrom || branchConfig.smsSenderId)
   );
   const whatsappStatus = resolveWhatsappChannelStatus(rawConfig);
+  const branchBilling = await buildBranchBillingPayload(user, branchOwner, rawConfig);
   const smsProvider = smsConfigured
     ? branchConfig.smsSenderId
       ? `Mittente ramo: ${branchConfig.smsSenderId}`
@@ -1425,6 +1567,7 @@ async function getDeliveryStatusForUser(user) {
       branchOwnerName: branchOwner ? branchOwner.fullName : null,
       usesClientBilling: rawConfig.whatsappMode === "meta_cloud"
     },
+    branchBilling,
     whatsappBranchConfig: {
       ...branchConfig,
       canManage: canManageBranchDeliveryConfig(user),
@@ -1719,6 +1862,81 @@ function buildReminderText(appointment, branchConfig) {
   return prependBusinessHeader(messageBody, branchConfig && branchConfig.businessDisplayName);
 }
 
+function channelUsesWallet(channel) {
+  return channel === "sms" || channel === "whatsapp";
+}
+
+function getWalletUnitPriceForChannel(branchConfig, channel) {
+  if (channel === "sms") {
+    return normalizeUnitPrice(branchConfig?.smsUnitPrice, DEFAULT_SMS_UNIT_PRICE);
+  }
+
+  if (channel === "whatsapp") {
+    return normalizeUnitPrice(branchConfig?.whatsappUnitPrice, DEFAULT_WHATSAPP_UNIT_PRICE);
+  }
+
+  return 0;
+}
+
+async function reserveWalletChargeForDelivery(appointment, channel, deliveryContext) {
+  const branchConfig = deliveryContext?.branchConfig;
+  const branchOwner = deliveryContext?.branchOwner;
+  if (!branchConfig || !branchOwner) {
+    return null;
+  }
+
+  if (normalizeBillingModel(branchConfig.billingModel) !== "wallet" || !channelUsesWallet(channel)) {
+    return null;
+  }
+
+  const amount = roundCurrency(getWalletUnitPriceForChannel(branchConfig, channel));
+  if (amount <= 0) {
+    return null;
+  }
+
+  const result = await applyWalletTransaction({
+    brandOwnerUserId: branchOwner.id,
+    amountDelta: -amount,
+    currency: branchConfig.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    type: "reminder_debit",
+    channel,
+    description: `Addebito remind ${channel.toUpperCase()} per ${appointment.clientName}`,
+    createdByUserId: appointment.createdByUserId || branchOwner.id,
+    appointmentId: appointment.id,
+    metadata: {
+      appointment_title: appointment.title,
+      reservation: true
+    }
+  });
+
+  return {
+    amount,
+    currency: branchConfig.walletCurrency || DEFAULT_WALLET_CURRENCY,
+    transactionId: result.transactionId
+  };
+}
+
+async function refundWalletChargeReservation(appointment, channel, deliveryContext, reservation, reason) {
+  if (!reservation || !deliveryContext?.branchOwner) {
+    return null;
+  }
+
+  return applyWalletTransaction({
+    brandOwnerUserId: deliveryContext.branchOwner.id,
+    amountDelta: reservation.amount,
+    currency: reservation.currency || DEFAULT_WALLET_CURRENCY,
+    type: "reminder_refund",
+    channel,
+    description: `Rimborso remind ${channel.toUpperCase()} non inviato`,
+    createdByUserId: appointment.createdByUserId || deliveryContext.branchOwner.id,
+    appointmentId: appointment.id,
+    metadata: {
+      reason: reason || "send_failed",
+      reservation_transaction_id: reservation.transactionId || null
+    }
+  });
+}
+
 async function processDueReminders() {
   if (reminderLoopBusy) {
     return;
@@ -1828,16 +2046,25 @@ async function sendNotificationChannel(channel, appointment, subject, message, d
 
   if (channel === "sms") {
     const smsDelivery = await resolveSmsDeliveryConfigForAppointment(appointment, deliveryContext);
-    if (smsDelivery.kind === "twilio") {
-      return sendTwilioMessage({
-        to: appointment.clientPhone,
-        from: smsDelivery.from,
-        body: message
-      });
-    }
+    const walletReservation =
+      smsDelivery.kind === "mock"
+        ? null
+        : await reserveWalletChargeForDelivery(appointment, channel, deliveryContext);
+    try {
+      if (smsDelivery.kind === "twilio") {
+        return await sendTwilioMessage({
+          to: appointment.clientPhone,
+          from: smsDelivery.from,
+          body: message
+        });
+      }
 
-    if (smsDelivery.kind === "mock") {
-      return sendMockNotification("sms", appointment.clientPhone, message);
+      if (smsDelivery.kind === "mock") {
+        return await sendMockNotification("sms", appointment.clientPhone, message);
+      }
+    } catch (error) {
+      await refundWalletChargeReservation(appointment, channel, deliveryContext, walletReservation, error.message);
+      throw error;
     }
 
     throw new Error(smsDelivery.error || "Canale SMS non configurato");
@@ -1848,25 +2075,34 @@ async function sendNotificationChannel(channel, appointment, subject, message, d
       appointment,
       deliveryContext
     );
-    if (whatsappDelivery.kind === "meta_cloud") {
-      return sendMetaWhatsappMessage({
-        accessToken: whatsappDelivery.accessToken,
-        phoneNumberId: whatsappDelivery.phoneNumberId,
-        to: appointment.clientPhone,
-        body: message
-      });
-    }
+    const walletReservation =
+      whatsappDelivery.kind === "mock"
+        ? null
+        : await reserveWalletChargeForDelivery(appointment, channel, deliveryContext);
+    try {
+      if (whatsappDelivery.kind === "meta_cloud") {
+        return await sendMetaWhatsappMessage({
+          accessToken: whatsappDelivery.accessToken,
+          phoneNumberId: whatsappDelivery.phoneNumberId,
+          to: appointment.clientPhone,
+          body: message
+        });
+      }
 
-    if (whatsappDelivery.kind === "system_twilio") {
-      return sendTwilioMessage({
-        to: ensureWhatsappPrefix(appointment.clientPhone),
-        from: ensureWhatsappPrefix(whatsappDelivery.from),
-        body: message
-      });
-    }
+      if (whatsappDelivery.kind === "system_twilio") {
+        return await sendTwilioMessage({
+          to: ensureWhatsappPrefix(appointment.clientPhone),
+          from: ensureWhatsappPrefix(whatsappDelivery.from),
+          body: message
+        });
+      }
 
-    if (whatsappDelivery.kind === "mock") {
-      return sendMockNotification("whatsapp", appointment.clientPhone, message);
+      if (whatsappDelivery.kind === "mock") {
+        return await sendMockNotification("whatsapp", appointment.clientPhone, message);
+      }
+    } catch (error) {
+      await refundWalletChargeReservation(appointment, channel, deliveryContext, walletReservation, error.message);
+      throw error;
     }
 
     throw new Error(whatsappDelivery.error || "Canale WhatsApp non configurato");
@@ -2218,6 +2454,37 @@ async function supabaseRequest({
   return payload;
 }
 
+async function supabaseRpc(functionName, args) {
+  const response = await fetch(`${SUPABASE_REST_URL}/rpc/${functionName}`, {
+    method: "POST",
+    headers: {
+      apikey: CONFIG.supabaseKey,
+      Authorization: `Bearer ${CONFIG.supabaseKey}`,
+      "Content-Profile": CONFIG.supabaseSchema,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: JSON.stringify(args || {})
+  });
+
+  const text = await response.text();
+  let payload = null;
+
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      payload = text;
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(extractSupabaseError(payload, response.status));
+  }
+
+  return payload;
+}
+
 function extractSupabaseError(payload, status) {
   if (payload && typeof payload === "object") {
     return payload.message || payload.error || `Errore Supabase (${status})`;
@@ -2347,6 +2614,199 @@ async function upsertAdminChannelConfig(config) {
   });
 
   return adminChannelConfigFromRow(Array.isArray(rows) ? rows[0] : rows);
+}
+
+async function listWalletTransactionsByBrandOwnerId(brandOwnerUserId, limit = 12) {
+  if (!brandOwnerUserId) {
+    return [];
+  }
+
+  const rows = await supabaseRequest({
+    table: CONFIG.walletTransactionsTable,
+    query: buildQuery({
+      select: "*",
+      brand_owner_user_id: `eq.${brandOwnerUserId}`,
+      order: "created_at.desc",
+      limit
+    })
+  });
+
+  return Array.isArray(rows) ? rows.map(walletTransactionFromRow) : [];
+}
+
+async function findWalletTransactionByStripeSessionId(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+
+  const rows = await supabaseRequest({
+    table: CONFIG.walletTransactionsTable,
+    query: buildQuery({
+      select: "*",
+      stripe_checkout_session_id: `eq.${sessionId}`,
+      limit: 1
+    })
+  });
+
+  if (!Array.isArray(rows) || !rows.length) {
+    return null;
+  }
+
+  return walletTransactionFromRow(rows[0]);
+}
+
+async function applyWalletTransaction(payload) {
+  const response = await supabaseRpc("apply_wallet_transaction", {
+    p_brand_owner_user_id: payload.brandOwnerUserId,
+    p_amount_delta: roundCurrency(payload.amountDelta),
+    p_currency: payload.currency || DEFAULT_WALLET_CURRENCY,
+    p_type: payload.type,
+    p_channel: payload.channel || null,
+    p_description: payload.description || null,
+    p_created_by_user_id: payload.createdByUserId || null,
+    p_appointment_id: payload.appointmentId || null,
+    p_metadata: payload.metadata || {},
+    p_stripe_checkout_session_id: payload.stripeCheckoutSessionId || null,
+    p_stripe_payment_intent_id: payload.stripePaymentIntentId || null,
+    p_allow_negative: Boolean(payload.allowNegative)
+  });
+
+  const result = Array.isArray(response) ? response[0] : response;
+  if (!result) {
+    throw new Error("Risposta wallet non valida");
+  }
+
+  return {
+    applied: Boolean(result.applied),
+    walletBalance: roundCurrency(result.wallet_balance || 0),
+    transactionId: result.transaction_id || null
+  };
+}
+
+async function buildBranchBillingPayload(actor, targetBranchOwner, config) {
+  const branchConfig = sanitizeAdminChannelConfig(config, null, targetBranchOwner);
+  const transactions = await listWalletTransactionsByBrandOwnerId(targetBranchOwner?.id, 12);
+
+  return {
+    brandOwnerUserId: targetBranchOwner ? targetBranchOwner.id : null,
+    branchOwnerName: targetBranchOwner ? targetBranchOwner.fullName : null,
+    billingModel: branchConfig.billingModel,
+    walletBalance: branchConfig.walletBalance,
+    walletCurrency: branchConfig.walletCurrency,
+    smsUnitPrice: branchConfig.smsUnitPrice,
+    whatsappUnitPrice: branchConfig.whatsappUnitPrice,
+    stripeReady: isStripeConfigured(),
+    topUpOptions: CONFIG.stripe.topUpOptions,
+    minimumTopUp: roundCurrency(CONFIG.stripe.minimumTopUp),
+    maximumTopUp: roundCurrency(CONFIG.stripe.maximumTopUp),
+    canManageBilling: Boolean(actor && actor.isPlatformOwner),
+    canTopUp: Boolean(actor && actor.role === "admin"),
+    transactions
+  };
+}
+
+function normalizeTopUpAmount(value) {
+  const amount = normalizeMoney(value, NaN);
+  if (!Number.isFinite(amount)) {
+    throw new Error("Inserisci un importo valido per la ricarica.");
+  }
+
+  if (amount < CONFIG.stripe.minimumTopUp) {
+    throw new Error(`La ricarica minima e ${formatMoney(CONFIG.stripe.minimumTopUp)}.`);
+  }
+
+  if (amount > CONFIG.stripe.maximumTopUp) {
+    throw new Error(`La ricarica massima e ${formatMoney(CONFIG.stripe.maximumTopUp)}.`);
+  }
+
+  return amount;
+}
+
+async function createStripeTopUpSession(req, actor, targetBranchOwner, amount) {
+  if (!CONFIG.stripe.secretKey) {
+    throw new Error("Stripe non configurato. Inserisci STRIPE_SECRET_KEY.");
+  }
+
+  const amountCents = moneyToCents(amount);
+  const origin = getRequestOrigin(req);
+  const currency = CONFIG.stripe.currency;
+  const branchName = targetBranchOwner?.fullName || "Ramo admin";
+  const successUrl = `${origin}/?wallet=success`;
+  const cancelUrl = `${origin}/?wallet=cancel`;
+  const stripe = getStripeClient();
+
+  return stripe.checkout.sessions.create({
+    mode: "payment",
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+    client_reference_id: targetBranchOwner.id,
+    metadata: {
+      kind: "wallet_top_up",
+      brand_owner_user_id: targetBranchOwner.id,
+      created_by_user_id: actor.id,
+      amount_cents: String(amountCents),
+      currency: currency.toUpperCase()
+    },
+    payment_intent_data: {
+      metadata: {
+        kind: "wallet_top_up",
+        brand_owner_user_id: targetBranchOwner.id,
+        created_by_user_id: actor.id
+      }
+    },
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency,
+          unit_amount: amountCents,
+          product_data: {
+            name: `Ricarica wallet remind - ${branchName}`
+          }
+        }
+      }
+    ]
+  });
+}
+
+async function handleStripeWebhookEvent(event) {
+  if (!event || event.type !== "checkout.session.completed") {
+    return;
+  }
+
+  const session = event.data && event.data.object ? event.data.object : null;
+  if (!session || session.mode !== "payment" || session.payment_status !== "paid") {
+    return;
+  }
+
+  if (session.metadata?.kind !== "wallet_top_up") {
+    return;
+  }
+
+  const brandOwnerUserId = String(session.metadata.brand_owner_user_id || "").trim();
+  if (!brandOwnerUserId) {
+    throw new Error("Sessione Stripe senza brand_owner_user_id.");
+  }
+
+  const amount = centsToMoney(session.amount_total || session.metadata.amount_cents || 0);
+  if (amount <= 0) {
+    throw new Error("Importo Stripe non valido per la ricarica wallet.");
+  }
+
+  await applyWalletTransaction({
+    brandOwnerUserId,
+    amountDelta: amount,
+    currency: String(session.currency || session.metadata.currency || DEFAULT_WALLET_CURRENCY).toUpperCase(),
+    type: "top_up",
+    description: `Ricarica wallet via Stripe (${formatMoney(amount)})`,
+    createdByUserId: session.metadata.created_by_user_id || null,
+    stripeCheckoutSessionId: session.id,
+    stripePaymentIntentId: session.payment_intent || null,
+    metadata: {
+      source: "stripe_checkout",
+      session_status: session.status || "complete"
+    }
+  });
 }
 
 async function userHasDependents(userId) {
@@ -2516,6 +2976,24 @@ function adminChannelConfigToRow(config) {
     ),
     created_at: config.createdAt,
     updated_at: config.updatedAt
+  };
+}
+
+function walletTransactionFromRow(row) {
+  return {
+    id: row.id,
+    brandOwnerUserId: row.brand_owner_user_id,
+    appointmentId: row.appointment_id || null,
+    createdByUserId: row.created_by_user_id || null,
+    type: row.type,
+    channel: row.channel || null,
+    amountDelta: roundCurrency(row.amount_delta || 0),
+    currency: row.currency || DEFAULT_WALLET_CURRENCY,
+    description: row.description || "",
+    stripeCheckoutSessionId: row.stripe_checkout_session_id || null,
+    stripePaymentIntentId: row.stripe_payment_intent_id || null,
+    metadata: row.metadata && typeof row.metadata === "object" ? row.metadata : {},
+    createdAt: row.created_at
   };
 }
 

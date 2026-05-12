@@ -91,6 +91,18 @@ function cacheElements() {
     "branchMetaBusinessAccountId",
     "branchMessagingSaveButton",
     "branchMessagingFeedback",
+    "branchBillingPanel",
+    "branchBillingForm",
+    "branchWalletBalanceValue",
+    "branchWalletBalanceHint",
+    "branchWalletBillingMode",
+    "branchWalletTopupAmount",
+    "branchWalletSmsUnitPrice",
+    "branchWalletWhatsappUnitPrice",
+    "branchWalletCheckoutButton",
+    "branchBillingSaveButton",
+    "branchBillingFeedback",
+    "branchWalletTransactions",
     "brandingPanel",
     "brandingManagerSection",
     "brandingForm",
@@ -121,6 +133,11 @@ function bindEvents() {
   elements.branchMessagingForm.addEventListener("submit", handleBranchMessagingSubmit);
   elements.branchWhatsappMode.addEventListener("change", updateBranchMessagingModeFields);
   elements.branchMessagingTargetAdminId.addEventListener("change", handleBranchMessagingTargetChange);
+  elements.branchBillingForm.addEventListener("submit", handleBranchBillingSubmit);
+  elements.branchWalletCheckoutButton.addEventListener("click", () => handleWalletCheckout(null));
+  document.querySelectorAll(".wallet-topup-button").forEach((button) => {
+    button.addEventListener("click", () => handleWalletCheckout(button.dataset.amount));
+  });
   elements.brandingForm.addEventListener("submit", handleBrandingSubmit);
   elements.removeBrandingButton.addEventListener("click", handleBrandingRemove);
   elements.brandingTargetAdminId.addEventListener("change", renderBrandingManager);
@@ -217,6 +234,7 @@ async function loadAppData() {
   }
 
   render();
+  applyWalletReturnMessage();
 }
 
 function render() {
@@ -227,6 +245,7 @@ function render() {
   renderUsers();
   renderDelivery();
   renderBranchMessagingSettings();
+  renderBranchBillingSettings();
   renderAppointments();
   renderBrandingManager();
   updateReminderFieldsState();
@@ -758,9 +777,153 @@ async function handleBranchMessagingTargetChange() {
     );
     state.delivery.branchMessagingConfig = response.config;
     state.delivery.whatsappBranchConfig = response.config;
+    state.delivery.branchBilling = response.billing;
     renderBranchMessagingSettings();
+    renderBranchBillingSettings();
   } catch (error) {
     setFeedback(elements.branchMessagingFeedback, error.message, true);
+  }
+}
+
+function renderBranchBillingSettings() {
+  const billing = state.delivery && state.delivery.branchBilling;
+  const canShowPanel = Boolean(state.currentUser && state.currentUser.role === "admin");
+  elements.branchBillingPanel.classList.toggle("hidden", !canShowPanel);
+
+  if (!canShowPanel || !billing) {
+    return;
+  }
+
+  elements.branchWalletBalanceValue.textContent = formatMoney(
+    billing.walletBalance,
+    billing.walletCurrency
+  );
+  elements.branchWalletBillingMode.value = billing.billingModel || "platform";
+  elements.branchWalletSmsUnitPrice.value = toMoneyInputValue(billing.smsUnitPrice);
+  elements.branchWalletWhatsappUnitPrice.value = toMoneyInputValue(billing.whatsappUnitPrice);
+
+  elements.branchWalletBalanceHint.textContent = billing.stripeReady
+    ? billing.billingModel === "wallet"
+      ? "I remind SMS e WhatsApp scaleranno il saldo di questo ramo."
+      : "Il wallet e attivo ma il ramo sta ancora usando il costo a carico della piattaforma."
+    : "Stripe non e ancora configurato. Il wallet non puo ricevere ricariche.";
+
+  const controlsDisabled = !billing.canManageBilling;
+  elements.branchWalletBillingMode.disabled = controlsDisabled;
+  elements.branchWalletSmsUnitPrice.disabled = controlsDisabled;
+  elements.branchWalletWhatsappUnitPrice.disabled = controlsDisabled;
+  elements.branchBillingSaveButton.disabled = controlsDisabled;
+
+  const canTopUp = Boolean(billing.canTopUp && billing.stripeReady);
+  document.querySelectorAll(".wallet-topup-button").forEach((button, index) => {
+    const option = Array.isArray(billing.topUpOptions) ? billing.topUpOptions[index] : null;
+    if (option) {
+      button.dataset.amount = String(option);
+      button.textContent = `Ricarica ${option}€`;
+      button.classList.remove("hidden");
+    } else {
+      button.classList.add("hidden");
+    }
+  });
+  elements.branchWalletTopupAmount.disabled = !canTopUp;
+  elements.branchWalletCheckoutButton.disabled = !canTopUp;
+  document.querySelectorAll(".wallet-topup-button").forEach((button) => {
+    button.disabled = !canTopUp;
+  });
+
+  renderWalletTransactions(billing.transactions || [], billing.walletCurrency);
+}
+
+function renderWalletTransactions(transactions, currency) {
+  if (!transactions.length) {
+    elements.branchWalletTransactions.innerHTML =
+      '<p class="muted">Nessun movimento wallet registrato per questo ramo.</p>';
+    return;
+  }
+
+  elements.branchWalletTransactions.innerHTML = transactions
+    .map((transaction) => {
+      const amountClass = transaction.amountDelta >= 0 ? "wallet-amount-positive" : "wallet-amount-negative";
+      const amountPrefix = transaction.amountDelta >= 0 ? "+" : "";
+      return `
+        <article class="compact-card wallet-transaction-card">
+          <div class="wallet-transaction-top">
+            <strong>${escapeHtml(describeWalletTransaction(transaction))}</strong>
+            <span class="${amountClass}">${amountPrefix}${escapeHtml(
+              formatMoney(transaction.amountDelta, transaction.currency || currency)
+            )}</span>
+          </div>
+          <span>${escapeHtml(formatDateTime(transaction.createdAt))}</span>
+          <span>${escapeHtml(transaction.description || "-")}</span>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function describeWalletTransaction(transaction) {
+  if (transaction.type === "top_up") {
+    return "Ricarica Stripe";
+  }
+  if (transaction.type === "reminder_debit") {
+    return `Addebito ${formatChannelLabel(transaction.channel)}`;
+  }
+  if (transaction.type === "reminder_refund") {
+    return `Rimborso ${formatChannelLabel(transaction.channel)}`;
+  }
+  return "Movimento wallet";
+}
+
+async function handleBranchBillingSubmit(event) {
+  event.preventDefault();
+  setFeedback(elements.branchBillingFeedback, "");
+
+  try {
+    const response = await api("/api/settings/branch-billing", {
+      method: "PUT",
+      body: {
+        targetAdminId: state.currentUser.isPlatformOwner ? state.selectedBranchMessagingAdminId : null,
+        billingModel: elements.branchWalletBillingMode.value,
+        smsUnitPrice: elements.branchWalletSmsUnitPrice.value,
+        whatsappUnitPrice: elements.branchWalletWhatsappUnitPrice.value
+      }
+    });
+
+    state.delivery = response.delivery;
+    state.delivery.branchBilling = response.billing;
+    state.delivery.branchMessagingConfig = {
+      ...(state.delivery.branchMessagingConfig || {}),
+      ...(response.config || {})
+    };
+    renderDelivery();
+    renderBranchMessagingSettings();
+    renderBranchBillingSettings();
+    setFeedback(elements.branchBillingFeedback, "Regole wallet aggiornate correttamente.");
+  } catch (error) {
+    setFeedback(elements.branchBillingFeedback, error.message, true);
+  }
+}
+
+async function handleWalletCheckout(presetAmount) {
+  setFeedback(elements.branchBillingFeedback, "");
+
+  try {
+    const amount = presetAmount || elements.branchWalletTopupAmount.value;
+    const response = await api("/api/billing/checkout-session", {
+      method: "POST",
+      body: {
+        targetAdminId: state.currentUser.isPlatformOwner ? state.selectedBranchMessagingAdminId : null,
+        amount
+      }
+    });
+
+    if (!response.url) {
+      throw new Error("Stripe non ha restituito un link di pagamento valido.");
+    }
+
+    window.location.href = response.url;
+  } catch (error) {
+    setFeedback(elements.branchBillingFeedback, error.message, true);
   }
 }
 
@@ -937,8 +1100,12 @@ async function handleBranchMessagingSubmit(event) {
     state.delivery = response.delivery;
     state.delivery.branchMessagingConfig = response.config;
     state.delivery.whatsappBranchConfig = response.config;
+    if (response.billing) {
+      state.delivery.branchBilling = response.billing;
+    }
     renderDelivery();
     renderBranchMessagingSettings();
+    renderBranchBillingSettings();
     setFeedback(
       elements.branchMessagingFeedback,
       mode === "meta_cloud"
@@ -1165,6 +1332,11 @@ function minutesToHoursValue(value) {
   return minutes / 60;
 }
 
+function toMoneyInputValue(value) {
+  const normalized = Number(value || 0);
+  return Number.isFinite(normalized) ? normalized.toFixed(2) : "0.00";
+}
+
 function updateUserLogoFieldState() {
   const showLogoField =
     state.currentUser &&
@@ -1297,6 +1469,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function formatMoney(value, currency = "EUR") {
+  const normalized = Number(value || 0);
+  return new Intl.NumberFormat("it-IT", {
+    style: "currency",
+    currency: String(currency || "EUR").toUpperCase(),
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(Number.isFinite(normalized) ? normalized : 0);
+}
+
 function formatDateTime(value) {
   if (!value) {
     return "-";
@@ -1318,6 +1500,28 @@ function toDateTimeLocalValue(value) {
 
 function toIsoString(value) {
   return new Date(value).toISOString();
+}
+
+function applyWalletReturnMessage() {
+  const params = new URLSearchParams(window.location.search || "");
+  const walletStatus = params.get("wallet");
+  if (!walletStatus) {
+    return;
+  }
+
+  if (walletStatus === "success") {
+    setFeedback(
+      elements.branchBillingFeedback,
+      "Pagamento Stripe completato. Il saldo wallet verra aggiornato appena Stripe conferma il pagamento."
+    );
+  } else if (walletStatus === "cancel") {
+    setFeedback(elements.branchBillingFeedback, "Ricarica Stripe annullata.", true);
+  }
+
+  params.delete("wallet");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash || ""}`;
+  window.history.replaceState({}, "", nextUrl);
 }
 
 function isSameDay(value, comparisonDate) {

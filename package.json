@@ -10,5 +10,8 @@
   "license": "MIT",
   "devDependencies": {
     "supabase": "^2.95.2"
+  },
+  "dependencies": {
+    "stripe": "^22.1.1"
   }
 }
