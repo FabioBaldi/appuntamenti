@@ -806,7 +806,7 @@ function renderBranchBillingSettings() {
     ? billing.billingModel === "wallet"
       ? "I remind SMS e WhatsApp scaleranno il saldo di questo ramo."
       : "Il wallet e attivo ma il ramo sta ancora usando il costo a carico della piattaforma."
-    : "Stripe non e ancora configurato. Il wallet non puo ricevere ricariche.";
+    : "Stripe non e ancora configurato. Puoi comunque impostare importi e testare i pulsanti: comparira un messaggio chiaro finche non colleghiamo le chiavi reali.";
 
   const controlsDisabled = !billing.canManageBilling;
   elements.branchWalletBillingMode.disabled = controlsDisabled;
@@ -814,7 +814,7 @@ function renderBranchBillingSettings() {
   elements.branchWalletWhatsappUnitPrice.disabled = controlsDisabled;
   elements.branchBillingSaveButton.disabled = controlsDisabled;
 
-  const canTopUp = Boolean(billing.canTopUp && billing.stripeReady);
+  const canTopUp = Boolean(billing.canTopUp);
   document.querySelectorAll(".wallet-topup-button").forEach((button, index) => {
     const option = Array.isArray(billing.topUpOptions) ? billing.topUpOptions[index] : null;
     if (option) {
@@ -908,6 +908,17 @@ async function handleWalletCheckout(presetAmount) {
   setFeedback(elements.branchBillingFeedback, "");
 
   try {
+    const billing = state.delivery && state.delivery.branchBilling;
+    if (!billing || !billing.canTopUp) {
+      throw new Error("Solo gli admin del ramo possono avviare una ricarica wallet.");
+    }
+
+    if (!billing.stripeReady) {
+      throw new Error(
+        "Stripe non e ancora collegato. Servono STRIPE_SECRET_KEY e STRIPE_WEBHOOK_SECRET prima di poter aprire il checkout reale."
+      );
+    }
+
     const amount = presetAmount || elements.branchWalletTopupAmount.value;
     const response = await api("/api/billing/checkout-session", {
       method: "POST",
