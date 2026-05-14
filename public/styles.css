@@ -482,6 +482,32 @@ textarea {
   line-height: 1.5;
 }
 
+.toggle-field {
+  align-content: start;
+}
+
+.toggle-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 2px;
+}
+
+.toggle-inline input {
+  width: auto;
+}
+
+.branch-email-test-actions {
+  display: grid;
+  align-content: end;
+  gap: 12px;
+}
+
+.branch-email-test-actions .secondary-button {
+  justify-self: start;
+}
+
 .wallet-balance-card {
   display: grid;
   gap: 10px;

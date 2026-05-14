@@ -62,12 +62,25 @@ Il sistema supporta due modalita:
 
 ### Email
 
-Provider supportato: `Resend`
+Il canale email ora puo funzionare in due modi:
+
+- `Email piattaforma`: usa `Resend` come fallback centrale
+- `Email propria del ramo`: ogni admin configura la propria mailbox `SMTP` direttamente dalla tab `Reminder`
+
+La modalita SMTP e pensata per essere semplice:
+
+- preset rapidi per `Google / Google Workspace`, `Microsoft 365` e `Altro SMTP`
+- dati minimi da inserire: mittente, host, porta, username e password/app password
+- invio di prova integrato prima di considerare il ramo operativo
+
+Fallback piattaforma con `Resend`:
 
 ```env
 RESEND_API_KEY=...
 RESEND_FROM_EMAIL=Appuntamenti <noreply@example.com>
 ```
+
+Per la mailbox del ramo non servono nuove variabili `.env`: la configurazione viene salvata nel database Supabase per ogni ramo admin.
 
 ### SMS e fallback WhatsApp della piattaforma
 

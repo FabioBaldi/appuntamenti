@@ -50,6 +50,19 @@ create table if not exists public.admin_channel_configs (
   brand_owner_user_id uuid primary key references public.app_users(id) on delete cascade,
   business_display_name text,
   sms_sender_id text,
+  email_mode text not null default 'system' check (email_mode in ('system', 'smtp')),
+  email_provider_preset text not null default 'custom',
+  email_from_name text,
+  email_from_email text,
+  email_reply_to text,
+  smtp_host text,
+  smtp_port integer not null default 587,
+  smtp_secure boolean not null default false,
+  smtp_username text,
+  smtp_password_encrypted text,
+  smtp_last_test_status text,
+  smtp_last_test_error text,
+  smtp_last_test_at timestamptz,
   whatsapp_mode text not null default 'system' check (whatsapp_mode in ('system', 'meta_cloud')),
   meta_access_token_encrypted text,
   meta_phone_number_id text,
@@ -70,6 +83,45 @@ alter table public.admin_channel_configs
 
 alter table public.admin_channel_configs
   add column if not exists sms_sender_id text;
+
+alter table public.admin_channel_configs
+  add column if not exists email_mode text not null default 'system';
+
+alter table public.admin_channel_configs
+  add column if not exists email_provider_preset text not null default 'custom';
+
+alter table public.admin_channel_configs
+  add column if not exists email_from_name text;
+
+alter table public.admin_channel_configs
+  add column if not exists email_from_email text;
+
+alter table public.admin_channel_configs
+  add column if not exists email_reply_to text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_host text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_port integer not null default 587;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_secure boolean not null default false;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_username text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_password_encrypted text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_last_test_status text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_last_test_error text;
+
+alter table public.admin_channel_configs
+  add column if not exists smtp_last_test_at timestamptz;
 
 alter table public.admin_channel_configs
   add column if not exists billing_model text not null default 'platform';

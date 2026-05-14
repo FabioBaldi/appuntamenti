@@ -485,6 +485,141 @@
                 </form>
               </section>
 
+              <section id="branchEmailPanel" class="panel hidden">
+                <div class="section-heading">
+                  <span class="eyebrow">Email del ramo</span>
+                  <h3>Mailbox per i remind</h3>
+                </div>
+
+                <form id="branchEmailForm" class="stack-form">
+                  <label id="branchEmailTargetField" class="hidden">
+                    <span>Ramo admin da configurare</span>
+                    <select id="branchEmailTargetAdminId"></select>
+                  </label>
+
+                  <label>
+                    <span>Modalita email</span>
+                    <select id="branchEmailMode">
+                      <option value="system">Email piattaforma</option>
+                      <option value="smtp">Email propria del ramo</option>
+                    </select>
+                  </label>
+
+                  <p id="branchEmailStatusHint" class="muted">
+                    Il ramo sta usando l'email della piattaforma. Passa alla mailbox propria del ramo
+                    per inviare con l'indirizzo del cliente.
+                  </p>
+
+                  <div class="info-list branch-email-smtp-only hidden">
+                    <p>Scegli il provider e inserisci la casella che il cliente usa gia ogni giorno.</p>
+                    <p>Per Gmail e Microsoft conviene usare una app password o credenziali dedicate SMTP.</p>
+                    <p>Il canale email del ramo si considera pronto solo dopo un invio di prova riuscito.</p>
+                  </div>
+
+                  <div class="field-grid two-columns branch-email-smtp-only hidden">
+                    <label>
+                      <span>Provider email</span>
+                      <select id="branchEmailProviderPreset">
+                        <option value="gmail">Google / Google Workspace</option>
+                        <option value="microsoft365">Microsoft 365</option>
+                        <option value="custom">Altro SMTP</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Nome mittente</span>
+                      <input
+                        id="branchEmailFromName"
+                        type="text"
+                        maxlength="80"
+                        placeholder="Es. Studio Rossi"
+                      />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns branch-email-smtp-only hidden">
+                    <label>
+                      <span>Email mittente</span>
+                      <input
+                        id="branchEmailFromEmail"
+                        type="email"
+                        placeholder="Es. appuntamenti@studiorossi.it"
+                      />
+                    </label>
+                    <label>
+                      <span>Reply-To (facoltativo)</span>
+                      <input
+                        id="branchEmailReplyTo"
+                        type="email"
+                        placeholder="Es. segreteria@studiorossi.it"
+                      />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns branch-email-smtp-only hidden">
+                    <label>
+                      <span>Server SMTP</span>
+                      <input id="branchEmailSmtpHost" type="text" placeholder="Es. smtp.gmail.com" />
+                    </label>
+                    <label>
+                      <span>Porta SMTP</span>
+                      <input id="branchEmailSmtpPort" type="number" min="1" max="65535" placeholder="587" />
+                    </label>
+                  </div>
+
+                  <div class="field-grid two-columns branch-email-smtp-only hidden">
+                    <label>
+                      <span>Username SMTP</span>
+                      <input
+                        id="branchEmailSmtpUsername"
+                        type="text"
+                        placeholder="Di solito coincide con la mail completa"
+                      />
+                    </label>
+                    <label class="toggle-field">
+                      <span>Connessione protetta</span>
+                      <div class="toggle-inline">
+                        <input id="branchEmailSmtpSecure" type="checkbox" />
+                        <span>Usa SSL/TLS diretto</span>
+                      </div>
+                    </label>
+                  </div>
+
+                  <label class="branch-email-smtp-only hidden">
+                    <span>Password o app password</span>
+                    <input
+                      id="branchEmailSmtpPassword"
+                      type="password"
+                      autocomplete="new-password"
+                      placeholder="Inserisci solo se vuoi salvarla o sostituirla"
+                    />
+                  </label>
+
+                  <div class="field-grid two-columns branch-email-smtp-only hidden">
+                    <label>
+                      <span>Invia mail di prova a</span>
+                      <input
+                        id="branchEmailTestTo"
+                        type="email"
+                        placeholder="Es. la tua mail per verificare la configurazione"
+                      />
+                    </label>
+                    <div class="branch-email-test-actions">
+                      <span class="muted">Quando ricevi la mail di prova, il ramo e pronto per i remind.</span>
+                      <button id="branchEmailTestButton" class="secondary-button" type="button">
+                        Invia test email
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="form-actions">
+                    <button id="branchEmailSaveButton" class="primary-button" type="submit">
+                      Salva email del ramo
+                    </button>
+                  </div>
+                  <p id="branchEmailFeedback" class="feedback"></p>
+                </form>
+              </section>
+
               <section id="branchBillingPanel" class="panel hidden">
                 <div class="section-heading">
                   <span class="eyebrow">Credito ramo</span>

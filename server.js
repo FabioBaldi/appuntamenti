@@ -4,6 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
 const Stripe = require("stripe");
+const nodemailer = require("nodemailer");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
@@ -448,8 +449,17 @@ function normalizeWhatsappProviderMode(value) {
   return String(value || "").trim().toLowerCase() === "meta_cloud" ? "meta_cloud" : "system";
 }
 
+function normalizeEmailProviderMode(value) {
+  return String(value || "").trim().toLowerCase() === "smtp" ? "smtp" : "system";
+}
+
 function normalizeBillingModel(value) {
   return String(value || "").trim().toLowerCase() === "wallet" ? "wallet" : "platform";
+}
+
+function normalizeEmailProviderPreset(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["gmail", "microsoft365", "custom"].includes(normalized) ? normalized : "custom";
 }
 
 function buildRawUserMap(users) {
@@ -671,9 +681,11 @@ async function handleApiRequest(req, res, url) {
         config: {
           ...sanitizeAdminChannelConfig(config, userMap, targetBranchOwner),
           canManageMessaging: canManageBranchDeliveryConfig(user),
+          canManageEmail: canManageBranchDeliveryConfig(user),
           canManagePremium: Boolean(user && user.isPlatformOwner),
           branchOwnerId: targetBranchOwner.id,
-          branchOwnerName: targetBranchOwner.fullName
+          branchOwnerName: targetBranchOwner.fullName,
+          usesOwnMailbox: normalizeEmailProviderMode(config.emailMode) === "smtp"
         },
         billing: await buildBranchBillingPayload(user, targetBranchOwner, config),
         targetAdmin: sanitizeUser(targetBranchOwner, userMap)
@@ -723,9 +735,11 @@ async function handleApiRequest(req, res, url) {
         config: {
           ...sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
           canManageMessaging: canManageBranchDeliveryConfig(user),
+          canManageEmail: canManageBranchDeliveryConfig(user),
           canManagePremium: Boolean(user && user.isPlatformOwner),
           branchOwnerId: targetBranchOwner.id,
-          branchOwnerName: targetBranchOwner.fullName
+          branchOwnerName: targetBranchOwner.fullName,
+          usesOwnMailbox: normalizeEmailProviderMode(savedConfig.emailMode) === "smtp"
         },
         billing: await buildBranchBillingPayload(user, targetBranchOwner, savedConfig),
         delivery: await getDeliveryStatusForUser(user)
@@ -765,6 +779,133 @@ async function handleApiRequest(req, res, url) {
         delivery: await getDeliveryStatusForUser(user)
       });
     } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/settings/branch-email") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    if (!canManageBranchDeliveryConfig(user)) {
+      return sendJson(res, 403, {
+        error: "Solo gli admin possono configurare l'email del proprio ramo"
+      });
+    }
+
+    const body = await readJsonBody(req);
+
+    try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+        user,
+        String(body.targetAdminId || "").trim() || null
+      );
+      const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+      const nextConfig = buildBranchEmailConfigPayload(body, user, existingConfig, targetBranchOwner);
+      const savedConfig = await upsertAdminChannelConfig(nextConfig);
+      const users = await listUsers({ includeSecrets: false });
+      const userMap = buildRawUserMap(users);
+      return sendJson(res, 200, {
+        config: {
+          ...sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
+          canManageEmail: canManageBranchDeliveryConfig(user),
+          branchOwnerId: targetBranchOwner.id,
+          branchOwnerName: targetBranchOwner.fullName,
+          usesOwnMailbox: normalizeEmailProviderMode(savedConfig.emailMode) === "smtp"
+        },
+        delivery: await getDeliveryStatusForUser(user)
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/settings/branch-email/test") {
+    const user = await requireAdmin(req, res);
+    if (!user) {
+      return;
+    }
+
+    if (!canManageBranchDeliveryConfig(user)) {
+      return sendJson(res, 403, {
+        error: "Solo gli admin possono testare l'email del proprio ramo"
+      });
+    }
+
+    const body = await readJsonBody(req);
+
+    try {
+      const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+        user,
+        String(body.targetAdminId || "").trim() || null
+      );
+      const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+      const testConfig = buildBranchEmailConfigPayload(body, user, existingConfig, targetBranchOwner);
+      const testRecipient = String(body.testTo || "").trim().toLowerCase();
+      if (!testRecipient || !isValidEmail(testRecipient)) {
+        throw new Error("Inserisci un indirizzo valido a cui inviare la mail di prova.");
+      }
+
+      const testMessage = {
+        to: testRecipient,
+        subject: `Test configurazione email - ${targetBranchOwner.fullName}`,
+        text:
+          `Questa e una mail di prova del canale reminder per il ramo "${targetBranchOwner.fullName}".\n\n` +
+          `Se la ricevi, la configurazione email del ramo e operativa.`,
+        branchOwnerName: targetBranchOwner.fullName
+      };
+
+      let result;
+      if (normalizeEmailProviderMode(testConfig.emailMode) === "smtp") {
+        result = await sendSmtpEmailNotification(testConfig, testMessage);
+      } else {
+        if (!(CONFIG.email.apiKey && CONFIG.email.from)) {
+          throw new Error("L'email piattaforma non e configurata. Attiva Resend oppure usa l'email propria del ramo.");
+        }
+        result = await sendResendEmailNotification(testRecipient, testMessage.subject, testMessage.text);
+      }
+
+      const savedConfig = await upsertAdminChannelConfig({
+        ...existingConfig,
+        ...testConfig,
+        smtpLastTestStatus: "success",
+        smtpLastTestError: null,
+        smtpLastTestAt: new Date().toISOString()
+      });
+      const users = await listUsers({ includeSecrets: false });
+      const userMap = buildRawUserMap(users);
+      return sendJson(res, 200, {
+        ok: true,
+        result,
+        config: {
+          ...sanitizeAdminChannelConfig(savedConfig, userMap, targetBranchOwner),
+          canManageEmail: canManageBranchDeliveryConfig(user),
+          branchOwnerId: targetBranchOwner.id,
+          branchOwnerName: targetBranchOwner.fullName,
+          usesOwnMailbox: normalizeEmailProviderMode(savedConfig.emailMode) === "smtp"
+        }
+      });
+    } catch (error) {
+      try {
+        const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
+          user,
+          String(body.targetAdminId || "").trim() || null
+        );
+        const existingConfig = await findAdminChannelConfigByBrandOwnerId(targetBranchOwner.id);
+        await upsertAdminChannelConfig({
+          ...existingConfig,
+          brandOwnerUserId: targetBranchOwner.id,
+          smtpLastTestStatus: "failed",
+          smtpLastTestError: error.message,
+          smtpLastTestAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+      } catch (nestedError) {
+        console.error("Impossibile aggiornare lo stato del test email:", nestedError);
+      }
+
       return sendJson(res, 400, { error: error.message });
     }
   }
@@ -1514,7 +1655,6 @@ function enrichAppointment(appointment, userMap) {
 }
 
 async function getDeliveryStatusForUser(user) {
-  const emailConfigured = Boolean(CONFIG.email.apiKey && CONFIG.email.from);
   const users = await listUsers({ includeSecrets: false });
   const userMap = buildRawUserMap(users);
   const effectiveAdminId = user ? getEffectiveAdminId(user) : null;
@@ -1523,6 +1663,7 @@ async function getDeliveryStatusForUser(user) {
     ? await findAdminChannelConfigByBrandOwnerId(effectiveAdminId)
     : getDefaultAdminChannelConfig(null, null);
   const branchConfig = sanitizeAdminChannelConfig(rawConfig, userMap, branchOwner);
+  const emailStatus = resolveEmailChannelStatus(rawConfig);
   const smsConfigured = Boolean(
     CONFIG.twilio.accountSid &&
       CONFIG.twilio.authToken &&
@@ -1543,9 +1684,9 @@ async function getDeliveryStatusForUser(user) {
     retryMinutes: REMINDER_RETRY_MINUTES,
     channels: {
       email: {
-        configured: emailConfigured,
-        provider: emailConfigured ? "Resend" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
-        mode: emailConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
+        configured: emailStatus.configured,
+        provider: emailStatus.provider,
+        mode: emailStatus.mode
       },
       sms: {
         configured: smsConfigured,
@@ -1567,6 +1708,13 @@ async function getDeliveryStatusForUser(user) {
       branchOwnerName: branchOwner ? branchOwner.fullName : null,
       usesClientBilling: rawConfig.whatsappMode === "meta_cloud"
     },
+    branchEmailConfig: {
+      ...branchConfig,
+      canManageEmail: canManageBranchDeliveryConfig(user),
+      branchOwnerId: effectiveAdminId,
+      branchOwnerName: branchOwner ? branchOwner.fullName : null,
+      usesOwnMailbox: normalizeEmailProviderMode(rawConfig.emailMode) === "smtp"
+    },
     branchBilling,
     whatsappBranchConfig: {
       ...branchConfig,
@@ -1578,12 +1726,60 @@ async function getDeliveryStatusForUser(user) {
   };
 }
 
+function hasSmtpEmailConfiguration(config) {
+  return Boolean(
+    config &&
+      config.smtpHost &&
+      Number(config.smtpPort || 0) > 0 &&
+      config.emailFromEmail &&
+      config.smtpUsername &&
+      config.smtpPasswordEncrypted
+  );
+}
+
+function resolveEmailChannelStatus(config) {
+  const normalizedConfig = config || getDefaultAdminChannelConfig(null);
+  if (normalizeEmailProviderMode(normalizedConfig.emailMode) === "smtp") {
+    const credentialsReady = hasSmtpEmailConfiguration(normalizedConfig);
+    const configured = credentialsReady && normalizedConfig.smtpLastTestStatus === "success";
+    return {
+      configured,
+      provider: configured
+        ? "Mailbox del ramo via SMTP"
+        : credentialsReady
+          ? "Mailbox del ramo da verificare"
+          : "Email del ramo da completare",
+      mode: configured ? "live" : "setup"
+    };
+  }
+
+  const emailConfigured = Boolean(CONFIG.email.apiKey && CONFIG.email.from);
+  return {
+    configured: emailConfigured,
+    provider: emailConfigured ? "Resend piattaforma" : CONFIG.allowMockDelivery ? "Mock" : "Non configurato",
+    mode: emailConfigured ? "live" : CONFIG.allowMockDelivery ? "mock" : "disabled"
+  };
+}
+
 function getDefaultAdminChannelConfig(brandOwnerUserId, branchOwnerUser) {
   const fallbackBusinessName = branchOwnerUser ? branchOwnerUser.fullName || "" : "";
   return {
     brandOwnerUserId: brandOwnerUserId || null,
     businessDisplayName: fallbackBusinessName,
     smsSenderId: "",
+    emailMode: "system",
+    emailProviderPreset: "custom",
+    emailFromName: fallbackBusinessName,
+    emailFromEmail: "",
+    emailReplyTo: "",
+    smtpHost: "",
+    smtpPort: 587,
+    smtpSecure: false,
+    smtpUsername: "",
+    smtpPasswordEncrypted: null,
+    smtpLastTestStatus: null,
+    smtpLastTestError: null,
+    smtpLastTestAt: null,
     whatsappMode: "system",
     metaAccessTokenEncrypted: null,
     metaPhoneNumberId: null,
@@ -1612,6 +1808,19 @@ function sanitizeAdminChannelConfig(config, userMap, explicitBranchOwner) {
     businessDisplayName,
     smsSenderId,
     suggestedSmsSenderId,
+    emailMode: normalizeEmailProviderMode(config.emailMode),
+    emailProviderPreset: normalizeEmailProviderPreset(config.emailProviderPreset),
+    emailFromName: String(config.emailFromName || businessDisplayName || branchOwner?.fullName || "").trim(),
+    emailFromEmail: String(config.emailFromEmail || "").trim(),
+    emailReplyTo: String(config.emailReplyTo || "").trim(),
+    smtpHost: String(config.smtpHost || "").trim(),
+    smtpPort: Number(config.smtpPort || 587),
+    smtpSecure: Boolean(config.smtpSecure),
+    smtpUsername: String(config.smtpUsername || "").trim(),
+    hasStoredSmtpPassword: Boolean(config.smtpPasswordEncrypted),
+    smtpLastTestStatus: config.smtpLastTestStatus || null,
+    smtpLastTestError: config.smtpLastTestError || "",
+    smtpLastTestAt: config.smtpLastTestAt || null,
     whatsappMode: normalizeWhatsappProviderMode(config.whatsappMode),
     hasStoredMetaAccessToken: Boolean(config.metaAccessTokenEncrypted),
     metaPhoneNumberId: config.metaPhoneNumberId || "",
@@ -1655,6 +1864,129 @@ function hasMetaWhatsappConfiguration(config) {
   return Boolean(config && config.metaAccessTokenEncrypted && config.metaPhoneNumberId);
 }
 
+function getEmailProviderPresetDefaults(preset) {
+  const normalized = normalizeEmailProviderPreset(preset);
+  if (normalized === "gmail") {
+    return {
+      smtpHost: "smtp.gmail.com",
+      smtpPort: 465,
+      smtpSecure: true
+    };
+  }
+
+  if (normalized === "microsoft365") {
+    return {
+      smtpHost: "smtp.office365.com",
+      smtpPort: 587,
+      smtpSecure: false
+    };
+  }
+
+  return {
+    smtpHost: "",
+    smtpPort: 587,
+    smtpSecure: false
+  };
+}
+
+function buildBranchEmailConfigPayload(body, actor, existingConfig, targetBranchOwner) {
+  const previous =
+    existingConfig || getDefaultAdminChannelConfig(targetBranchOwner.id, targetBranchOwner);
+  const now = new Date().toISOString();
+  const emailMode = normalizeEmailProviderMode(body.emailMode || previous.emailMode);
+  const emailProviderPreset = normalizeEmailProviderPreset(body.emailProviderPreset || previous.emailProviderPreset);
+  const presetDefaults = getEmailProviderPresetDefaults(emailProviderPreset);
+  const rawFromName = String(
+    body.emailFromName ?? previous.emailFromName ?? previous.businessDisplayName ?? targetBranchOwner.fullName
+  )
+    .trim()
+    .slice(0, 80);
+  const rawFromEmail = String(body.emailFromEmail ?? previous.emailFromEmail ?? "")
+    .trim()
+    .toLowerCase();
+  const rawReplyTo = String(body.emailReplyTo ?? previous.emailReplyTo ?? "")
+    .trim()
+    .toLowerCase();
+  const rawSmtpHost = String(body.smtpHost ?? previous.smtpHost ?? presetDefaults.smtpHost)
+    .trim()
+    .toLowerCase();
+  const smtpPort = Number(body.smtpPort ?? previous.smtpPort ?? presetDefaults.smtpPort);
+  const smtpSecure = parseBoolean(body.smtpSecure, Boolean(previous.smtpSecure ?? presetDefaults.smtpSecure));
+  const rawSmtpUsername = String(body.smtpUsername ?? previous.smtpUsername ?? "")
+    .trim()
+    .toLowerCase();
+  const nextPassword = String(body.smtpPassword || "").trim();
+  const nextConfig = {
+    ...previous,
+    brandOwnerUserId: targetBranchOwner.id,
+    businessDisplayName: previous.businessDisplayName || targetBranchOwner.fullName,
+    emailMode,
+    emailProviderPreset,
+    emailFromName: rawFromName || previous.businessDisplayName || targetBranchOwner.fullName,
+    emailFromEmail: rawFromEmail,
+    emailReplyTo: rawReplyTo || null,
+    smtpHost: rawSmtpHost,
+    smtpPort: Number.isFinite(smtpPort) ? Math.trunc(smtpPort) : presetDefaults.smtpPort,
+    smtpSecure,
+    smtpUsername: rawSmtpUsername,
+    smtpPasswordEncrypted: previous.smtpPasswordEncrypted || null,
+    smtpLastTestStatus: previous.smtpLastTestStatus || null,
+    smtpLastTestError: previous.smtpLastTestError || null,
+    smtpLastTestAt: previous.smtpLastTestAt || null,
+    updatedAt: now
+  };
+
+  if (nextPassword) {
+    nextConfig.smtpPasswordEncrypted = encryptSensitiveValue(nextPassword);
+  }
+
+  const smtpConfigChanged =
+    normalizeEmailProviderMode(previous.emailMode) !== nextConfig.emailMode ||
+    normalizeEmailProviderPreset(previous.emailProviderPreset) !== nextConfig.emailProviderPreset ||
+    String(previous.emailFromName || "").trim() !== nextConfig.emailFromName ||
+    String(previous.emailFromEmail || "").trim().toLowerCase() !== nextConfig.emailFromEmail ||
+    String(previous.emailReplyTo || "").trim().toLowerCase() !== String(nextConfig.emailReplyTo || "").trim().toLowerCase() ||
+    String(previous.smtpHost || "").trim().toLowerCase() !== nextConfig.smtpHost ||
+    Number(previous.smtpPort || 587) !== Number(nextConfig.smtpPort || 587) ||
+    Boolean(previous.smtpSecure) !== Boolean(nextConfig.smtpSecure) ||
+    String(previous.smtpUsername || "").trim().toLowerCase() !== nextConfig.smtpUsername ||
+    Boolean(nextPassword);
+
+  if (smtpConfigChanged) {
+    nextConfig.smtpLastTestStatus = null;
+    nextConfig.smtpLastTestError = null;
+    nextConfig.smtpLastTestAt = null;
+  }
+
+  if (emailMode === "smtp") {
+    if (!nextConfig.emailFromEmail || !isValidEmail(nextConfig.emailFromEmail)) {
+      throw new Error("Inserisci una email mittente valida per il ramo.");
+    }
+
+    if (nextConfig.emailReplyTo && !isValidEmail(nextConfig.emailReplyTo)) {
+      throw new Error("L'indirizzo Reply-To non e valido.");
+    }
+
+    if (!nextConfig.smtpHost) {
+      throw new Error("Inserisci il server SMTP del provider del ramo.");
+    }
+
+    if (!Number.isInteger(nextConfig.smtpPort) || nextConfig.smtpPort <= 0 || nextConfig.smtpPort > 65535) {
+      throw new Error("La porta SMTP deve essere un numero valido compreso tra 1 e 65535.");
+    }
+
+    if (!nextConfig.smtpUsername) {
+      throw new Error("Inserisci l'username SMTP del ramo.");
+    }
+
+    if (!nextConfig.smtpPasswordEncrypted) {
+      throw new Error("Inserisci la password o app password SMTP del ramo.");
+    }
+  }
+
+  return nextConfig;
+}
+
 function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
   const targetBranchOwner = arguments.length > 3 && arguments[3] ? arguments[3] : actor;
   const previous =
@@ -1674,6 +2006,7 @@ function buildBranchMessagingConfigPayload(body, actor, existingConfig) {
   }
 
   const nextConfig = {
+    ...previous,
     brandOwnerUserId: targetBranchOwner.id,
     businessDisplayName,
     smsSenderId,
@@ -2038,10 +2371,25 @@ function mergeReminderResults(appointment, results) {
 
 async function sendNotificationChannel(channel, appointment, subject, message, deliveryContext) {
   if (channel === "email") {
-    if (CONFIG.email.apiKey && CONFIG.email.from) {
-      return sendEmailNotification(appointment.clientEmail, subject, message);
+    const emailDelivery = await resolveEmailDeliveryConfigForAppointment(appointment, deliveryContext);
+    if (emailDelivery.kind === "smtp") {
+      return sendSmtpEmailNotification(emailDelivery.config, {
+        to: appointment.clientEmail,
+        subject,
+        text: message,
+        branchOwnerName: deliveryContext?.branchOwner?.fullName || appointment.clientName
+      });
     }
-    return sendMockNotification("email", appointment.clientEmail, message);
+
+    if (emailDelivery.kind === "resend") {
+      return sendResendEmailNotification(appointment.clientEmail, subject, message);
+    }
+
+    if (emailDelivery.kind === "mock") {
+      return sendMockNotification("email", appointment.clientEmail, message);
+    }
+
+    throw new Error(emailDelivery.error || "Canale email non configurato");
   }
 
   if (channel === "sms") {
@@ -2138,6 +2486,52 @@ async function resolveBranchMessagingContextForAppointment(appointment) {
   };
 }
 
+async function resolveEmailDeliveryConfigForAppointment(appointment, deliveryContext) {
+  const context = deliveryContext || (await resolveBranchMessagingContextForAppointment(appointment));
+  const branchConfig = context.rawConfig || getDefaultAdminChannelConfig(null, null);
+  const emailMode = normalizeEmailProviderMode(branchConfig.emailMode);
+
+  if (emailMode === "smtp") {
+    if (!hasSmtpEmailConfiguration(branchConfig)) {
+      return {
+        kind: "error",
+        error: "Il ramo usa una mailbox propria, ma la configurazione SMTP email non e ancora completa"
+      };
+    }
+
+    return {
+      kind: "smtp",
+      config: {
+        emailFromName: branchConfig.emailFromName || context.branchOwner?.fullName || "",
+        emailFromEmail: branchConfig.emailFromEmail,
+        emailReplyTo: branchConfig.emailReplyTo || "",
+        smtpHost: branchConfig.smtpHost,
+        smtpPort: Number(branchConfig.smtpPort || 587),
+        smtpSecure: Boolean(branchConfig.smtpSecure),
+        smtpUsername: branchConfig.smtpUsername,
+        smtpPassword: decryptSensitiveValue(branchConfig.smtpPasswordEncrypted)
+      }
+    };
+  }
+
+  if (CONFIG.email.apiKey && CONFIG.email.from) {
+    return {
+      kind: "resend"
+    };
+  }
+
+  if (CONFIG.allowMockDelivery) {
+    return {
+      kind: "mock"
+    };
+  }
+
+  return {
+    kind: "error",
+    error: "Canale email non configurato"
+  };
+}
+
 async function resolveSmsDeliveryConfigForAppointment(appointment, deliveryContext) {
   const context = deliveryContext || (await resolveBranchMessagingContextForAppointment(appointment));
   const branchConfig = context.branchConfig || getDefaultAdminChannelConfig(null, null);
@@ -2186,7 +2580,7 @@ async function sendMockNotification(channel, destination, message) {
   };
 }
 
-async function sendEmailNotification(to, subject, text) {
+async function sendResendEmailNotification(to, subject, text) {
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -2211,6 +2605,42 @@ async function sendEmailNotification(to, subject, text) {
     mode: "live",
     messageId: payload.id || null
   };
+}
+
+async function sendSmtpEmailNotification(emailConfig, payload) {
+  const transporter = nodemailer.createTransport({
+    host: emailConfig.smtpHost,
+    port: Number(emailConfig.smtpPort || 587),
+    secure: Boolean(emailConfig.smtpSecure),
+    auth: {
+      user: emailConfig.smtpUsername,
+      pass: emailConfig.smtpPassword
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000
+  });
+
+  try {
+    const info = await transporter.sendMail({
+      from: {
+        name: emailConfig.emailFromName || payload.branchOwnerName || "Reminder appuntamenti",
+        address: emailConfig.emailFromEmail
+      },
+      to: payload.to,
+      replyTo: emailConfig.emailReplyTo || undefined,
+      subject: payload.subject,
+      text: payload.text
+    });
+
+    return {
+      provider: "SMTP del ramo",
+      mode: "live",
+      messageId: info.messageId || null
+    };
+  } finally {
+    transporter.close();
+  }
 }
 
 async function sendTwilioMessage({ to, from, body }) {
@@ -2939,6 +3369,19 @@ function adminChannelConfigFromRow(row) {
     brandOwnerUserId: row.brand_owner_user_id,
     businessDisplayName: row.business_display_name || "",
     smsSenderId: row.sms_sender_id || "",
+    emailMode: normalizeEmailProviderMode(row.email_mode),
+    emailProviderPreset: normalizeEmailProviderPreset(row.email_provider_preset),
+    emailFromName: row.email_from_name || "",
+    emailFromEmail: row.email_from_email || "",
+    emailReplyTo: row.email_reply_to || "",
+    smtpHost: row.smtp_host || "",
+    smtpPort: Number(row.smtp_port || 587),
+    smtpSecure: Boolean(row.smtp_secure),
+    smtpUsername: row.smtp_username || "",
+    smtpPasswordEncrypted: row.smtp_password_encrypted || null,
+    smtpLastTestStatus: row.smtp_last_test_status || null,
+    smtpLastTestError: row.smtp_last_test_error || null,
+    smtpLastTestAt: row.smtp_last_test_at || null,
     whatsappMode: normalizeWhatsappProviderMode(row.whatsapp_mode),
     metaAccessTokenEncrypted: row.meta_access_token_encrypted || null,
     metaPhoneNumberId: row.meta_phone_number_id || null,
@@ -2960,6 +3403,19 @@ function adminChannelConfigToRow(config) {
     brand_owner_user_id: config.brandOwnerUserId,
     business_display_name: nullableString(config.businessDisplayName),
     sms_sender_id: nullableString(config.smsSenderId),
+    email_mode: normalizeEmailProviderMode(config.emailMode),
+    email_provider_preset: normalizeEmailProviderPreset(config.emailProviderPreset),
+    email_from_name: nullableString(config.emailFromName),
+    email_from_email: nullableString(config.emailFromEmail),
+    email_reply_to: nullableString(config.emailReplyTo),
+    smtp_host: nullableString(config.smtpHost),
+    smtp_port: Number(config.smtpPort || 587),
+    smtp_secure: Boolean(config.smtpSecure),
+    smtp_username: nullableString(config.smtpUsername),
+    smtp_password_encrypted: config.smtpPasswordEncrypted || null,
+    smtp_last_test_status: nullableString(config.smtpLastTestStatus),
+    smtp_last_test_error: nullableString(config.smtpLastTestError),
+    smtp_last_test_at: config.smtpLastTestAt || null,
     whatsapp_mode: normalizeWhatsappProviderMode(config.whatsappMode),
     meta_access_token_encrypted: config.metaAccessTokenEncrypted || null,
     meta_phone_number_id: config.metaPhoneNumberId || null,

@@ -12,6 +12,7 @@
     "supabase": "^2.95.2"
   },
   "dependencies": {
+    "nodemailer": "^8.0.7",
     "stripe": "^22.1.1"
   }
 }

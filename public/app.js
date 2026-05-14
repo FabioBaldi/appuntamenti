@@ -91,6 +91,25 @@ function cacheElements() {
     "branchMetaBusinessAccountId",
     "branchMessagingSaveButton",
     "branchMessagingFeedback",
+    "branchEmailPanel",
+    "branchEmailForm",
+    "branchEmailTargetField",
+    "branchEmailTargetAdminId",
+    "branchEmailMode",
+    "branchEmailProviderPreset",
+    "branchEmailFromName",
+    "branchEmailFromEmail",
+    "branchEmailReplyTo",
+    "branchEmailSmtpHost",
+    "branchEmailSmtpPort",
+    "branchEmailSmtpSecure",
+    "branchEmailSmtpUsername",
+    "branchEmailSmtpPassword",
+    "branchEmailTestTo",
+    "branchEmailStatusHint",
+    "branchEmailSaveButton",
+    "branchEmailTestButton",
+    "branchEmailFeedback",
     "branchBillingPanel",
     "branchBillingForm",
     "branchWalletBalanceValue",
@@ -133,6 +152,12 @@ function bindEvents() {
   elements.branchMessagingForm.addEventListener("submit", handleBranchMessagingSubmit);
   elements.branchWhatsappMode.addEventListener("change", updateBranchMessagingModeFields);
   elements.branchMessagingTargetAdminId.addEventListener("change", handleBranchMessagingTargetChange);
+  elements.branchEmailForm.addEventListener("submit", handleBranchEmailSubmit);
+  elements.branchEmailTargetAdminId.addEventListener("change", handleBranchEmailTargetChange);
+  elements.branchEmailMode.addEventListener("change", updateBranchEmailModeFields);
+  elements.branchEmailProviderPreset.addEventListener("change", handleBranchEmailPresetChange);
+  elements.branchEmailFromEmail.addEventListener("change", handleBranchEmailFromEmailChange);
+  elements.branchEmailTestButton.addEventListener("click", handleBranchEmailTest);
   elements.branchBillingForm.addEventListener("submit", handleBranchBillingSubmit);
   elements.branchWalletCheckoutButton.addEventListener("click", () => handleWalletCheckout(null));
   document.querySelectorAll(".wallet-topup-button").forEach((button) => {
@@ -245,6 +270,7 @@ function render() {
   renderUsers();
   renderDelivery();
   renderBranchMessagingSettings();
+  renderBranchEmailSettings();
   renderBranchBillingSettings();
   renderAppointments();
   renderBrandingManager();
@@ -620,10 +646,18 @@ function describeDeliveryChannel(channel, config, branchConfig) {
   }
 
   if (config.mode === "setup") {
+    if (channel === "email") {
+      return "Per usare la mailbox del ramo completa host SMTP, credenziali e invio di prova.";
+    }
     return "Per usare il numero WhatsApp dedicato del cliente completa i dati premium del ramo.";
   }
 
   if (channel === "email") {
+    if (branchConfig && branchConfig.emailMode === "smtp") {
+      return branchConfig.emailFromEmail
+        ? `Invio reale dalla mailbox del ramo usando ${branchConfig.emailFromEmail}.`
+        : "Invio reale dalla mailbox del ramo tramite SMTP.";
+    }
     return "Invio reale attivo tramite email della piattaforma.";
   }
 
@@ -745,6 +779,74 @@ function renderBranchMessagingTargetSelector(branchConfig, isPlatformOwner) {
   }
 }
 
+function renderBranchEmailSettings() {
+  const branchConfig =
+    state.delivery && (state.delivery.branchEmailConfig || state.delivery.branchMessagingConfig);
+  const canShowPanel = Boolean(state.currentUser && state.currentUser.role === "admin");
+  const isPlatformOwner = Boolean(state.currentUser && state.currentUser.isPlatformOwner);
+  elements.branchEmailPanel.classList.toggle("hidden", !canShowPanel);
+
+  if (!canShowPanel || !branchConfig) {
+    return;
+  }
+
+  renderBranchEmailTargetSelector(branchConfig, isPlatformOwner);
+
+  elements.branchEmailMode.value = branchConfig.emailMode || "system";
+  elements.branchEmailProviderPreset.value = branchConfig.emailProviderPreset || "custom";
+  elements.branchEmailFromName.value = branchConfig.emailFromName || branchConfig.businessDisplayName || "";
+  elements.branchEmailFromEmail.value = branchConfig.emailFromEmail || "";
+  elements.branchEmailReplyTo.value = branchConfig.emailReplyTo || "";
+  elements.branchEmailSmtpHost.value = branchConfig.smtpHost || "";
+  elements.branchEmailSmtpPort.value = branchConfig.smtpPort || 587;
+  elements.branchEmailSmtpSecure.checked = Boolean(branchConfig.smtpSecure);
+  elements.branchEmailSmtpUsername.value = branchConfig.smtpUsername || "";
+  elements.branchEmailSmtpPassword.value = "";
+  elements.branchEmailSmtpPassword.placeholder = branchConfig.hasStoredSmtpPassword
+    ? "Gia salvata. Inseriscine una nuova solo se vuoi sostituirla."
+    : "Password o app password SMTP";
+  if (!elements.branchEmailTestTo.value) {
+    elements.branchEmailTestTo.value = branchConfig.emailFromEmail || "";
+  }
+
+  const branchOwnerLabel = branchConfig.branchOwnerName || "questo ramo";
+  if (!branchConfig.canManageEmail) {
+    elements.branchEmailStatusHint.textContent = `La configurazione email di ${branchOwnerLabel} e gestita da un admin del ramo.`;
+  } else if (branchConfig.emailMode === "smtp") {
+    elements.branchEmailStatusHint.textContent = branchConfig.smtpLastTestAt
+      ? branchConfig.smtpLastTestStatus === "success"
+        ? `Mailbox del ramo verificata il ${formatDateTime(branchConfig.smtpLastTestAt)}.`
+        : branchConfig.smtpLastTestError
+          ? `Ultimo test fallito il ${formatDateTime(branchConfig.smtpLastTestAt)}: ${branchConfig.smtpLastTestError}`
+          : `Ultimo test fallito il ${formatDateTime(branchConfig.smtpLastTestAt)}.`
+      : "Configura la mailbox del ramo con SMTP e usa il test per verificare l'invio.";
+  } else {
+    elements.branchEmailStatusHint.textContent =
+      "Il ramo usa ancora l'email della piattaforma. Passa a Email propria del ramo per usare la casella del cliente.";
+  }
+
+  const controlsDisabled = !branchConfig.canManageEmail;
+  elements.branchEmailForm.querySelectorAll("input, select, button").forEach((field) => {
+    field.disabled = controlsDisabled;
+  });
+
+  updateBranchEmailModeFields();
+}
+
+function renderBranchEmailTargetSelector(branchConfig, isPlatformOwner) {
+  elements.branchEmailTargetField.classList.toggle("hidden", !isPlatformOwner);
+  if (!isPlatformOwner) {
+    return;
+  }
+
+  elements.branchEmailTargetAdminId.innerHTML = elements.branchMessagingTargetAdminId.innerHTML;
+  if (state.selectedBranchMessagingAdminId) {
+    elements.branchEmailTargetAdminId.value = state.selectedBranchMessagingAdminId;
+  } else if (branchConfig.branchOwnerId) {
+    elements.branchEmailTargetAdminId.value = branchConfig.branchOwnerId;
+  }
+}
+
 function updateBranchMessagingModeFields() {
   const branchConfig =
     state.delivery && (state.delivery.branchMessagingConfig || state.delivery.whatsappBranchConfig);
@@ -765,6 +867,29 @@ function updateBranchMessagingModeFields() {
 
 async function handleBranchMessagingTargetChange() {
   state.selectedBranchMessagingAdminId = elements.branchMessagingTargetAdminId.value || null;
+  if (elements.branchEmailTargetAdminId.value !== state.selectedBranchMessagingAdminId) {
+    elements.branchEmailTargetAdminId.value = state.selectedBranchMessagingAdminId || "";
+  }
+  setFeedback(elements.branchMessagingFeedback, "");
+  setFeedback(elements.branchEmailFeedback, "");
+
+  if (!state.selectedBranchMessagingAdminId) {
+    return;
+  }
+
+  try {
+    await loadSelectedBranchConfig();
+  } catch (error) {
+    setFeedback(elements.branchMessagingFeedback, error.message, true);
+  }
+}
+
+async function handleBranchEmailTargetChange() {
+  state.selectedBranchMessagingAdminId = elements.branchEmailTargetAdminId.value || null;
+  if (elements.branchMessagingTargetAdminId.value !== state.selectedBranchMessagingAdminId) {
+    elements.branchMessagingTargetAdminId.value = state.selectedBranchMessagingAdminId || "";
+  }
+  setFeedback(elements.branchEmailFeedback, "");
   setFeedback(elements.branchMessagingFeedback, "");
 
   if (!state.selectedBranchMessagingAdminId) {
@@ -772,16 +897,182 @@ async function handleBranchMessagingTargetChange() {
   }
 
   try {
-    const response = await api(
-      `/api/settings/branch-config?targetAdminId=${encodeURIComponent(state.selectedBranchMessagingAdminId)}`
-    );
-    state.delivery.branchMessagingConfig = response.config;
-    state.delivery.whatsappBranchConfig = response.config;
-    state.delivery.branchBilling = response.billing;
-    renderBranchMessagingSettings();
-    renderBranchBillingSettings();
+    await loadSelectedBranchConfig();
   } catch (error) {
-    setFeedback(elements.branchMessagingFeedback, error.message, true);
+    setFeedback(elements.branchEmailFeedback, error.message, true);
+  }
+}
+
+async function loadSelectedBranchConfig() {
+  const response = await api(
+    `/api/settings/branch-config?targetAdminId=${encodeURIComponent(state.selectedBranchMessagingAdminId)}`
+  );
+  state.delivery.branchMessagingConfig = response.config;
+  state.delivery.whatsappBranchConfig = response.config;
+  state.delivery.branchEmailConfig = response.config;
+  state.delivery.branchBilling = response.billing;
+  renderBranchMessagingSettings();
+  renderBranchEmailSettings();
+  renderBranchBillingSettings();
+}
+
+function updateBranchEmailModeFields() {
+  const branchConfig =
+    state.delivery && (state.delivery.branchEmailConfig || state.delivery.branchMessagingConfig);
+  const useOwnMailbox = elements.branchEmailMode.value === "smtp";
+  const controlsDisabled = !(branchConfig && branchConfig.canManageEmail);
+
+  document.querySelectorAll(".branch-email-smtp-only").forEach((node) => {
+    node.classList.toggle("hidden", !useOwnMailbox);
+  });
+
+  [
+    elements.branchEmailProviderPreset,
+    elements.branchEmailFromName,
+    elements.branchEmailFromEmail,
+    elements.branchEmailReplyTo,
+    elements.branchEmailSmtpHost,
+    elements.branchEmailSmtpPort,
+    elements.branchEmailSmtpSecure,
+    elements.branchEmailSmtpUsername,
+    elements.branchEmailSmtpPassword,
+    elements.branchEmailTestTo,
+    elements.branchEmailTestButton
+  ].forEach((field) => {
+    if (!field) {
+      return;
+    }
+    field.disabled = controlsDisabled || !useOwnMailbox;
+  });
+
+  if (!useOwnMailbox) {
+    elements.branchEmailSaveButton.textContent = "Usa email piattaforma";
+  } else {
+    elements.branchEmailSaveButton.textContent = "Salva email del ramo";
+  }
+}
+
+function handleBranchEmailPresetChange() {
+  const preset = String(elements.branchEmailProviderPreset.value || "custom").trim().toLowerCase();
+  if (preset === "gmail") {
+    elements.branchEmailSmtpHost.value = "smtp.gmail.com";
+    elements.branchEmailSmtpPort.value = 465;
+    elements.branchEmailSmtpSecure.checked = true;
+    if (!elements.branchEmailSmtpUsername.value && elements.branchEmailFromEmail.value) {
+      elements.branchEmailSmtpUsername.value = elements.branchEmailFromEmail.value;
+    }
+    return;
+  }
+
+  if (preset === "microsoft365") {
+    elements.branchEmailSmtpHost.value = "smtp.office365.com";
+    elements.branchEmailSmtpPort.value = 587;
+    elements.branchEmailSmtpSecure.checked = false;
+    if (!elements.branchEmailSmtpUsername.value && elements.branchEmailFromEmail.value) {
+      elements.branchEmailSmtpUsername.value = elements.branchEmailFromEmail.value;
+    }
+    return;
+  }
+
+  if (!elements.branchEmailSmtpHost.value) {
+    elements.branchEmailSmtpPort.value = 587;
+    elements.branchEmailSmtpSecure.checked = false;
+  }
+}
+
+function handleBranchEmailFromEmailChange() {
+  const fromEmail = String(elements.branchEmailFromEmail.value || "").trim();
+  if (!elements.branchEmailSmtpUsername.value && fromEmail) {
+    elements.branchEmailSmtpUsername.value = fromEmail;
+  }
+  if (!elements.branchEmailTestTo.value && fromEmail) {
+    elements.branchEmailTestTo.value = fromEmail;
+  }
+}
+
+function getBranchEmailRequestPayload(includeTestAddress = false) {
+  const payload = {
+    targetAdminId: state.currentUser.isPlatformOwner ? state.selectedBranchMessagingAdminId : null,
+    emailMode: elements.branchEmailMode.value,
+    emailProviderPreset: elements.branchEmailProviderPreset.value,
+    emailFromName: elements.branchEmailFromName.value,
+    emailFromEmail: elements.branchEmailFromEmail.value,
+    emailReplyTo: elements.branchEmailReplyTo.value,
+    smtpHost: elements.branchEmailSmtpHost.value,
+    smtpPort: elements.branchEmailSmtpPort.value,
+    smtpSecure: elements.branchEmailSmtpSecure.checked,
+    smtpUsername: elements.branchEmailSmtpUsername.value,
+    smtpPassword: elements.branchEmailSmtpPassword.value
+  };
+
+  if (includeTestAddress) {
+    payload.testTo = elements.branchEmailTestTo.value;
+  }
+
+  return payload;
+}
+
+async function handleBranchEmailSubmit(event) {
+  event.preventDefault();
+  setFeedback(elements.branchEmailFeedback, "");
+
+  try {
+    const response = await api("/api/settings/branch-email", {
+      method: "PUT",
+      body: getBranchEmailRequestPayload(false)
+    });
+
+    state.delivery = response.delivery;
+    state.delivery.branchEmailConfig = response.config;
+    state.delivery.branchMessagingConfig = {
+      ...(state.delivery.branchMessagingConfig || {}),
+      ...(response.config || {})
+    };
+    state.delivery.whatsappBranchConfig = {
+      ...(state.delivery.whatsappBranchConfig || {}),
+      ...(response.config || {})
+    };
+    renderDelivery();
+    renderBranchMessagingSettings();
+    renderBranchEmailSettings();
+    setFeedback(
+      elements.branchEmailFeedback,
+      response.config.emailMode === "smtp"
+        ? "Mailbox del ramo salvata. Usa il test email per verificare subito la configurazione."
+        : "Il ramo ora usa di nuovo l'email della piattaforma."
+    );
+  } catch (error) {
+    setFeedback(elements.branchEmailFeedback, error.message, true);
+  }
+}
+
+async function handleBranchEmailTest() {
+  setFeedback(elements.branchEmailFeedback, "");
+
+  try {
+    const response = await api("/api/settings/branch-email/test", {
+      method: "POST",
+      body: getBranchEmailRequestPayload(true)
+    });
+
+    state.delivery.branchEmailConfig = response.config;
+    state.delivery.branchMessagingConfig = {
+      ...(state.delivery.branchMessagingConfig || {}),
+      ...(response.config || {})
+    };
+    state.delivery.whatsappBranchConfig = {
+      ...(state.delivery.whatsappBranchConfig || {}),
+      ...(response.config || {})
+    };
+    renderDelivery();
+    renderBranchMessagingSettings();
+    renderBranchEmailSettings();
+    setFeedback(
+      elements.branchEmailFeedback,
+      `Mail di prova inviata correttamente con ${response.result.provider}.`
+    );
+  } catch (error) {
+    setFeedback(elements.branchEmailFeedback, error.message, true);
   }
 }
 
