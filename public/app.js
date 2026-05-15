@@ -4,7 +4,9 @@ const state = {
   users: [],
   delivery: null,
   activeTab: "dashboard",
-  selectedBranchMessagingAdminId: null
+  selectedBranchMessagingAdminId: null,
+  calendarView: "month",
+  calendarCursor: startOfDay(new Date())
 };
 
 const elements = {};
@@ -35,6 +37,13 @@ function cacheElements() {
     "dashboardStats",
     "upcomingAppointments",
     "deliverySummary",
+    "calendarPrevButton",
+    "calendarTodayButton",
+    "calendarNextButton",
+    "calendarViewMode",
+    "calendarRangeLabel",
+    "calendarSummary",
+    "calendarContent",
     "appointmentForm",
     "appointmentFormTitle",
     "appointmentId",
@@ -143,6 +152,10 @@ function bindEvents() {
   elements.loginForm.addEventListener("submit", handleLogin);
   elements.logoutButton.addEventListener("click", handleLogout);
   elements.refreshButton.addEventListener("click", loadAppData);
+  elements.calendarPrevButton.addEventListener("click", () => shiftCalendarRange(-1));
+  elements.calendarTodayButton.addEventListener("click", resetCalendarToToday);
+  elements.calendarNextButton.addEventListener("click", () => shiftCalendarRange(1));
+  elements.calendarViewMode.addEventListener("change", handleCalendarViewChange);
   elements.appointmentForm.addEventListener("submit", handleAppointmentSubmit);
   elements.cancelAppointmentEdit.addEventListener("click", resetAppointmentForm);
   elements.userForm.addEventListener("submit", handleUserSubmit);
@@ -171,6 +184,7 @@ function bindEvents() {
   });
 
   elements.appointmentsList.addEventListener("click", handleAppointmentListClick);
+  elements.calendarContent.addEventListener("click", handleCalendarContentClick);
   elements.usersList.addEventListener("click", handleUsersListClick);
 }
 
@@ -234,7 +248,10 @@ async function handleLogout() {
   state.appointments = [];
   state.users = [];
   state.delivery = null;
+  state.activeTab = "dashboard";
   state.selectedBranchMessagingAdminId = null;
+  state.calendarView = "month";
+  state.calendarCursor = startOfDay(new Date());
   showLogin();
 }
 
@@ -267,6 +284,7 @@ function render() {
   renderHeader();
   renderTabs();
   renderDashboard();
+  renderCalendar();
   renderUsers();
   renderDelivery();
   renderBranchMessagingSettings();
@@ -321,8 +339,15 @@ function renderTabs() {
     node.classList.toggle("hidden", !isAdmin);
   });
   if (!isAdmin && state.activeTab === "users") {
-    switchTab("dashboard");
+    state.activeTab = "dashboard";
   }
+
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === state.activeTab);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `${state.activeTab}Tab`);
+  });
 }
 
 function switchTab(tabName) {
@@ -484,6 +509,184 @@ function renderAppointments() {
         })
         .join("")
     : `<p class="muted">Nessun appuntamento presente.</p>`;
+}
+
+function renderCalendar() {
+  const appointments = [...state.appointments].sort(
+    (left, right) => new Date(left.startAt) - new Date(right.startAt)
+  );
+  const view = state.calendarView || "month";
+  elements.calendarViewMode.value = view;
+
+  if (!appointments.length) {
+    elements.calendarRangeLabel.textContent = "Calendario appuntamenti";
+    elements.calendarSummary.textContent = "Nessun appuntamento disponibile nel periodo selezionato.";
+    elements.calendarContent.innerHTML =
+      '<div class="calendar-empty-state"><p class="muted">Crea il primo appuntamento per visualizzarlo nel calendario.</p></div>';
+    return;
+  }
+
+  if (view === "day") {
+    renderDayCalendar(appointments);
+    return;
+  }
+
+  if (view === "week") {
+    renderWeekCalendar(appointments);
+    return;
+  }
+
+  renderMonthCalendar(appointments);
+}
+
+function renderDayCalendar(appointments) {
+  const selectedDay = startOfDay(state.calendarCursor);
+  const dayAppointments = appointments.filter((appointment) =>
+    isDateWithinDay(appointment.startAt, selectedDay)
+  );
+  elements.calendarRangeLabel.textContent = formatCalendarDayLabel(selectedDay);
+  elements.calendarSummary.textContent = `${dayAppointments.length} appuntamenti nel giorno selezionato.`;
+
+  elements.calendarContent.innerHTML = `
+    <div class="calendar-day-view">
+      ${dayAppointments.length
+        ? dayAppointments
+            .map((appointment) => {
+              return `
+                <article class="calendar-agenda-card" data-id="${appointment.id}">
+                  <div class="calendar-agenda-time">
+                    <strong>${formatTime(appointment.startAt)}</strong>
+                    <span>${appointment.endAt ? formatTime(appointment.endAt) : "Fine libera"}</span>
+                  </div>
+                  <div class="calendar-agenda-body">
+                    <span class="status-pill">${escapeHtml(mapAppointmentStatus(appointment.status))}</span>
+                    <h4>${escapeHtml(appointment.title)}</h4>
+                    <p>${escapeHtml(appointment.clientName)}${appointment.service ? ` · ${escapeHtml(appointment.service)}` : ""}</p>
+                    <div class="calendar-agenda-meta">
+                      <span>${escapeHtml(appointment.location || "Luogo non indicato")}</span>
+                      <span>${escapeHtml(appointment.assignedUserName || "Non assegnato")}</span>
+                    </div>
+                  </div>
+                </article>
+              `;
+            })
+            .join("")
+        : '<div class="calendar-empty-state"><p class="muted">Nessun appuntamento in questo giorno.</p></div>'}
+    </div>
+  `;
+}
+
+function renderWeekCalendar(appointments) {
+  const weekStart = startOfWeek(state.calendarCursor);
+  const weekDays = Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
+  const rangeEnd = addDays(weekStart, 6);
+  const weekAppointments = appointments.filter((appointment) =>
+    isDateWithinRangeInclusive(new Date(appointment.startAt), weekStart, rangeEnd)
+  );
+  elements.calendarRangeLabel.textContent = `${formatCalendarShortDate(weekStart)} - ${formatCalendarShortDate(rangeEnd)}`;
+  elements.calendarSummary.textContent = `${weekAppointments.length} appuntamenti nella settimana selezionata.`;
+
+  elements.calendarContent.innerHTML = `
+    <div class="calendar-week-grid">
+      ${weekDays
+        .map((day) => {
+          const dayAppointments = weekAppointments.filter((appointment) =>
+            isDateWithinDay(appointment.startAt, day)
+          );
+          return `
+            <section class="calendar-day-column ${isSameDay(day, new Date()) ? "calendar-day-column-today" : ""}">
+              <header class="calendar-day-column-head">
+                <span>${formatWeekdayLabel(day)}</span>
+                <strong>${formatDayNumberLabel(day)}</strong>
+              </header>
+              <div class="calendar-day-column-body">
+                ${
+                  dayAppointments.length
+                    ? dayAppointments
+                        .map(
+                          (appointment) => `
+                            <article class="calendar-mini-card" data-id="${appointment.id}">
+                              <strong>${formatTime(appointment.startAt)}</strong>
+                              <span>${escapeHtml(appointment.title)}</span>
+                              <small>${escapeHtml(appointment.clientName)}</small>
+                            </article>
+                          `
+                        )
+                        .join("")
+                    : '<p class="muted calendar-column-empty">Nessun appuntamento</p>'
+                }
+              </div>
+            </section>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderMonthCalendar(appointments) {
+  const monthStart = startOfMonth(state.calendarCursor);
+  const monthEnd = endOfMonth(state.calendarCursor);
+  const gridStart = startOfWeek(monthStart);
+  const gridEnd = addDays(gridStart, 41);
+  const monthAppointments = appointments.filter((appointment) =>
+    isDateWithinRangeInclusive(new Date(appointment.startAt), gridStart, gridEnd)
+  );
+  const monthDays = Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  elements.calendarRangeLabel.textContent = formatMonthYearLabel(monthStart);
+  elements.calendarSummary.textContent = `${appointments.filter((appointment) => isDateWithinRangeInclusive(new Date(appointment.startAt), monthStart, monthEnd)).length} appuntamenti nel mese selezionato.`;
+
+  elements.calendarContent.innerHTML = `
+    <div class="calendar-month-shell">
+      <div class="calendar-month-head">
+        ${["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+          .map((label) => `<span>${label}</span>`)
+          .join("")}
+      </div>
+      <div class="calendar-month-grid">
+        ${monthDays
+          .map((day) => {
+            const dayAppointments = monthAppointments
+              .filter((appointment) => isDateWithinDay(appointment.startAt, day))
+              .slice(0, 3);
+            const totalForDay = monthAppointments.filter((appointment) => isDateWithinDay(appointment.startAt, day)).length;
+            const isCurrentMonth = day.getMonth() === monthStart.getMonth();
+            return `
+              <section class="calendar-month-cell ${isCurrentMonth ? "" : "calendar-month-cell-muted"} ${
+                isSameDay(day, new Date()) ? "calendar-month-cell-today" : ""
+              }">
+                <div class="calendar-month-cell-head">
+                  <strong>${day.getDate()}</strong>
+                  ${totalForDay ? `<span class="calendar-day-badge">${totalForDay}</span>` : ""}
+                </div>
+                <div class="calendar-month-cell-body">
+                  ${
+                    dayAppointments.length
+                      ? dayAppointments
+                          .map(
+                            (appointment) => `
+                              <article class="calendar-month-card" data-id="${appointment.id}">
+                                <strong>${formatTime(appointment.startAt)}</strong>
+                                <span>${escapeHtml(appointment.title)}</span>
+                              </article>
+                            `
+                          )
+                          .join("")
+                      : '<span class="calendar-empty-inline">-</span>'
+                  }
+                  ${
+                    totalForDay > 3
+                      ? `<span class="calendar-more-link">+${totalForDay - 3} altri</span>`
+                      : ""
+                  }
+                </div>
+              </section>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderUsers() {
@@ -1704,6 +1907,43 @@ function updateReminderFieldsState() {
     .forEach((field) => (field.disabled = !enabled));
 }
 
+function handleCalendarViewChange() {
+  state.calendarView = elements.calendarViewMode.value || "month";
+  renderCalendar();
+}
+
+function resetCalendarToToday() {
+  state.calendarCursor = startOfDay(new Date());
+  renderCalendar();
+}
+
+function shiftCalendarRange(direction) {
+  const current = startOfDay(state.calendarCursor);
+  if (state.calendarView === "day") {
+    state.calendarCursor = addDays(current, direction);
+  } else if (state.calendarView === "week") {
+    state.calendarCursor = addDays(current, direction * 7);
+  } else {
+    state.calendarCursor = addMonths(current, direction);
+  }
+  renderCalendar();
+}
+
+function handleCalendarContentClick(event) {
+  const card = event.target.closest("[data-id]");
+  if (!card) {
+    return;
+  }
+
+  const appointment = state.appointments.find((item) => item.id === card.dataset.id);
+  if (!appointment) {
+    return;
+  }
+
+  populateAppointmentForm(appointment);
+  switchTab("appointments");
+}
+
 function initializeDefaultDate() {
   const nextHour = new Date();
   nextHour.setMinutes(0, 0, 0);
@@ -1813,6 +2053,53 @@ function formatDateTime(value) {
   }).format(date);
 }
 
+function formatTime(value) {
+  if (!value) {
+    return "-";
+  }
+
+  return new Intl.DateTimeFormat("it-IT", {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function formatCalendarDayLabel(value) {
+  return new Intl.DateTimeFormat("it-IT", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(new Date(value));
+}
+
+function formatCalendarShortDate(value) {
+  return new Intl.DateTimeFormat("it-IT", {
+    day: "numeric",
+    month: "short"
+  }).format(new Date(value));
+}
+
+function formatMonthYearLabel(value) {
+  return new Intl.DateTimeFormat("it-IT", {
+    month: "long",
+    year: "numeric"
+  }).format(new Date(value));
+}
+
+function formatWeekdayLabel(value) {
+  return new Intl.DateTimeFormat("it-IT", {
+    weekday: "short"
+  }).format(new Date(value));
+}
+
+function formatDayNumberLabel(value) {
+  return new Intl.DateTimeFormat("it-IT", {
+    day: "2-digit",
+    month: "2-digit"
+  }).format(new Date(value));
+}
+
 function toDateTimeLocalValue(value) {
   const date = new Date(value);
   const offset = date.getTimezoneOffset();
@@ -1853,4 +2140,51 @@ function isSameDay(value, comparisonDate) {
     date.getMonth() === comparisonDate.getMonth() &&
     date.getFullYear() === comparisonDate.getFullYear()
   );
+}
+
+function startOfDay(value) {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function addDays(value, amount) {
+  const date = new Date(value);
+  date.setDate(date.getDate() + amount);
+  return startOfDay(date);
+}
+
+function addMonths(value, amount) {
+  const date = new Date(value);
+  date.setMonth(date.getMonth() + amount, 1);
+  return startOfDay(date);
+}
+
+function startOfWeek(value) {
+  const date = startOfDay(value);
+  const day = date.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  return addDays(date, diff);
+}
+
+function startOfMonth(value) {
+  const date = startOfDay(value);
+  date.setDate(1);
+  return date;
+}
+
+function endOfMonth(value) {
+  const date = startOfMonth(value);
+  date.setMonth(date.getMonth() + 1, 0);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function isDateWithinDay(value, day) {
+  return isSameDay(value, day);
+}
+
+function isDateWithinRangeInclusive(date, start, end) {
+  const current = startOfDay(date).getTime();
+  return current >= startOfDay(start).getTime() && current <= startOfDay(end).getTime();
 }

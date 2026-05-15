@@ -84,6 +84,7 @@
 
           <nav class="tab-row">
             <button class="tab-button active" data-tab="dashboard" type="button">Dashboard</button>
+            <button class="tab-button" data-tab="calendar" type="button">Calendario</button>
             <button class="tab-button" data-tab="appointments" type="button">Appuntamenti</button>
             <button class="tab-button admin-only" data-tab="users" type="button">Utenti</button>
             <button class="tab-button" data-tab="delivery" type="button">Reminder</button>
@@ -240,6 +241,41 @@
                   <h3>Appuntamenti</h3>
                 </div>
                 <div id="appointmentsList" class="appointments-list"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="calendarTab" class="tab-panel">
+            <div class="calendar-shell">
+              <section class="panel">
+                <div class="section-heading">
+                  <span class="eyebrow">Calendario operativo</span>
+                  <h3>Vista giorno, settimana e mese</h3>
+                </div>
+
+                <div class="calendar-toolbar">
+                  <div class="calendar-nav-buttons">
+                    <button id="calendarPrevButton" class="secondary-button" type="button">Indietro</button>
+                    <button id="calendarTodayButton" class="secondary-button" type="button">Oggi</button>
+                    <button id="calendarNextButton" class="secondary-button" type="button">Avanti</button>
+                  </div>
+
+                  <div class="calendar-toolbar-main">
+                    <strong id="calendarRangeLabel" class="calendar-range-label"></strong>
+                    <span id="calendarSummary" class="muted"></span>
+                  </div>
+
+                  <label class="calendar-view-selector">
+                    <span>Vista</span>
+                    <select id="calendarViewMode">
+                      <option value="day">Giornaliera</option>
+                      <option value="week">Settimanale</option>
+                      <option value="month">Mensile</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div id="calendarContent" class="calendar-content"></div>
               </section>
             </div>
           </section>
