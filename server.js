@@ -859,7 +859,13 @@ async function handleApiRequest(req, res, url) {
 
       let result;
       if (normalizeEmailProviderMode(testConfig.emailMode) === "smtp") {
-        result = await sendSmtpEmailNotification(testConfig, testMessage);
+        result = await sendSmtpEmailNotification(
+          {
+            ...testConfig,
+            smtpPassword: decryptSensitiveValue(testConfig.smtpPasswordEncrypted)
+          },
+          testMessage
+        );
       } else {
         if (!(CONFIG.email.apiKey && CONFIG.email.from)) {
           throw new Error("L'email piattaforma non e configurata. Attiva Resend oppure usa l'email propria del ramo.");
@@ -888,6 +894,7 @@ async function handleApiRequest(req, res, url) {
         }
       });
     } catch (error) {
+      const friendlyMessage = humanizeSmtpError(error.message || error, body);
       try {
         const targetBranchOwner = await resolveBranchOwnerForSettingsRequest(
           user,
@@ -898,7 +905,7 @@ async function handleApiRequest(req, res, url) {
           ...existingConfig,
           brandOwnerUserId: targetBranchOwner.id,
           smtpLastTestStatus: "failed",
-          smtpLastTestError: error.message,
+          smtpLastTestError: friendlyMessage,
           smtpLastTestAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         });
@@ -906,7 +913,7 @@ async function handleApiRequest(req, res, url) {
         console.error("Impossibile aggiornare lo stato del test email:", nestedError);
       }
 
-      return sendJson(res, 400, { error: error.message });
+      return sendJson(res, 400, { error: friendlyMessage });
     }
   }
 
@@ -1887,6 +1894,32 @@ function getEmailProviderPresetDefaults(preset) {
     smtpPort: 587,
     smtpSecure: false
   };
+}
+
+function humanizeSmtpError(message, config) {
+  const rawMessage = String(message || "").trim();
+  const normalized = rawMessage.toLowerCase();
+  const preset = normalizeEmailProviderPreset(config && config.emailProviderPreset);
+
+  if (normalized.includes('missing credentials for "plain"')) {
+    return "Il server SMTP non ha ricevuto credenziali valide. Controlla username SMTP e password o app password del ramo.";
+  }
+
+  if (
+    preset === "gmail" &&
+    (normalized.includes("invalid login") || normalized.includes("username and password not accepted"))
+  ) {
+    return "Gmail ha rifiutato l'accesso SMTP. Usa una app password Google da 16 caratteri e non la password normale dell'account.";
+  }
+
+  if (
+    preset === "microsoft365" &&
+    (normalized.includes("invalid login") || normalized.includes("authentication unsuccessful"))
+  ) {
+    return "Microsoft 365 ha rifiutato l'accesso SMTP. Verifica username, password e che SMTP AUTH sia abilitato per la mailbox.";
+  }
+
+  return rawMessage;
 }
 
 function buildBranchEmailConfigPayload(body, actor, existingConfig, targetBranchOwner) {
