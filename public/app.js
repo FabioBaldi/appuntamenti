@@ -964,6 +964,26 @@ function handleBranchEmailPresetChange() {
     return;
   }
 
+  if (preset === "aruba_domain") {
+    elements.branchEmailSmtpHost.value = "smtps.aruba.it";
+    elements.branchEmailSmtpPort.value = 465;
+    elements.branchEmailSmtpSecure.checked = true;
+    if (!elements.branchEmailSmtpUsername.value && elements.branchEmailFromEmail.value) {
+      elements.branchEmailSmtpUsername.value = elements.branchEmailFromEmail.value;
+    }
+    return;
+  }
+
+  if (preset === "aruba_free") {
+    elements.branchEmailSmtpHost.value = "smtp.aruba.it";
+    elements.branchEmailSmtpPort.value = 465;
+    elements.branchEmailSmtpSecure.checked = true;
+    if (!elements.branchEmailSmtpUsername.value && elements.branchEmailFromEmail.value) {
+      elements.branchEmailSmtpUsername.value = elements.branchEmailFromEmail.value;
+    }
+    return;
+  }
+
   if (preset === "microsoft365") {
     elements.branchEmailSmtpHost.value = "smtp.office365.com";
     elements.branchEmailSmtpPort.value = 587;

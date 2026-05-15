@@ -459,7 +459,9 @@ function normalizeBillingModel(value) {
 
 function normalizeEmailProviderPreset(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  return ["gmail", "microsoft365", "custom"].includes(normalized) ? normalized : "custom";
+  return ["gmail", "microsoft365", "aruba_domain", "aruba_free", "custom"].includes(normalized)
+    ? normalized
+    : "custom";
 }
 
 function buildRawUserMap(users) {
@@ -1889,6 +1891,22 @@ function getEmailProviderPresetDefaults(preset) {
     };
   }
 
+  if (normalized === "aruba_domain") {
+    return {
+      smtpHost: "smtps.aruba.it",
+      smtpPort: 465,
+      smtpSecure: true
+    };
+  }
+
+  if (normalized === "aruba_free") {
+    return {
+      smtpHost: "smtp.aruba.it",
+      smtpPort: 465,
+      smtpSecure: true
+    };
+  }
+
   return {
     smtpHost: "",
     smtpPort: 587,
@@ -1900,9 +1918,24 @@ function humanizeSmtpError(message, config) {
   const rawMessage = String(message || "").trim();
   const normalized = rawMessage.toLowerCase();
   const preset = normalizeEmailProviderPreset(config && config.emailProviderPreset);
+  const emailFrom = String((config && config.emailFromEmail) || "")
+    .trim()
+    .toLowerCase();
+  const smtpHost = String((config && config.smtpHost) || "")
+    .trim()
+    .toLowerCase();
+  const isArubaFreeMailbox =
+    emailFrom.endsWith("@aruba.it") || emailFrom.endsWith("@technet.it");
 
   if (normalized.includes('missing credentials for "plain"')) {
     return "Il server SMTP non ha ricevuto credenziali valide. Controlla username SMTP e password o app password del ramo.";
+  }
+
+  if (smtpHost === "smtp.aruba.it" && emailFrom && !isArubaFreeMailbox) {
+    return (
+      "Per una casella Aruba su dominio personalizzato usa smtps.aruba.it porta 465 con SSL/TLS. " +
+      "smtp.aruba.it e pensato per le caselle gratuite @aruba.it o @technet.it."
+    );
   }
 
   if (
